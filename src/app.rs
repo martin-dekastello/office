@@ -1,3 +1,4 @@
+use crate::complete::{self, Completion};
 use crate::config::Config;
 use crate::keys;
 use crate::providers::{self, SyncReport};
@@ -186,6 +187,8 @@ pub struct App {
     pub state: State,
     pub focus: Focus,
     pub mode: Mode,
+    /// Tab matches on show in the directory prompt.
+    pub completion: Option<Completion>,
     pub prefix: (KeyCode, KeyModifiers),
     pub msg: Option<(String, Instant)>,
     sync_rx: Option<Receiver<SyncReport>>,
@@ -236,6 +239,7 @@ impl App {
             state,
             focus: Focus::Sidebar,
             mode: Mode::Normal,
+            completion: None,
             prefix,
             msg: None,
             sync_rx: None,
@@ -942,6 +946,7 @@ impl App {
     fn on_paste(&mut self, s: String) {
         if let Mode::Prompt(_, buf) = &mut self.mode {
             buf.push_str(s.lines().next().unwrap_or(""));
+            self.completion = None;
             return;
         }
         if self.focus == Focus::Terminal {
@@ -1044,26 +1049,40 @@ impl App {
                     }
                 }
             }
-            Mode::Prompt(kind, mut buf) => match k.code {
-                KeyCode::Esc => self.mode = Mode::Normal,
-                KeyCode::Enter => {
-                    self.mode = Mode::Normal;
-                    match kind {
-                        PromptKind::NewIssue => self.new_local_issue(buf),
-                        PromptKind::RenameTab => self.rename_tab(buf),
-                        PromptKind::ClaudeDir => self.new_claude_in(buf),
+            Mode::Prompt(kind, mut buf) => {
+                let mut completion = self.completion.take();
+                match k.code {
+                    KeyCode::Esc => self.mode = Mode::Normal,
+                    KeyCode::Enter => {
+                        self.mode = Mode::Normal;
+                        match kind {
+                            PromptKind::NewIssue => self.new_local_issue(buf),
+                            PromptKind::RenameTab => self.rename_tab(buf),
+                            PromptKind::ClaudeDir => self.new_claude_in(buf),
+                        }
                     }
+                    KeyCode::Tab | KeyCode::BackTab if kind == PromptKind::ClaudeDir => {
+                        if !complete::tab(&mut buf, &mut completion, k.code == KeyCode::Tab) {
+                            self.flash("No matching directories".into());
+                        }
+                        self.completion = completion;
+                        self.mode = Mode::Prompt(kind, buf);
+                    }
+                    KeyCode::Backspace => {
+                        buf.pop();
+                        self.mode = Mode::Prompt(kind, buf);
+                    }
+                    KeyCode::Char(c) if !k.modifiers.contains(KeyModifiers::CONTROL) => {
+                        // A selected match already ends in a separator.
+                        let cycling = completion.is_some_and(|c| c.selected.is_some());
+                        if !(cycling && std::path::is_separator(c)) {
+                            buf.push(c);
+                        }
+                        self.mode = Mode::Prompt(kind, buf);
+                    }
+                    _ => {}
                 }
-                KeyCode::Backspace => {
-                    buf.pop();
-                    self.mode = Mode::Prompt(kind, buf);
-                }
-                KeyCode::Char(c) if !k.modifiers.contains(KeyModifiers::CONTROL) => {
-                    buf.push(c);
-                    self.mode = Mode::Prompt(kind, buf);
-                }
-                _ => {}
-            },
+            }
             Mode::Prefix => {
                 self.mode = Mode::Normal;
                 self.on_prefix_command(k);
