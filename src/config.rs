@@ -55,7 +55,8 @@ pub struct Config {
     pub local_repo: Option<PathBuf>,
     /// Ring the host terminal bell when a background tab needs you or finishes.
     pub bell: bool,
-    /// Capture the mouse (click sidebar/tabs, wheel and clicks in tabs). Hold Shift/Option to select text.
+    /// Capture the mouse (click sidebar/tabs, wheel and clicks in tabs, drag to copy in shell tabs).
+    /// Elsewhere, hold Shift/Option to select text.
     pub mouse: bool,
     pub github: Vec<GithubSource>,
     pub jira: Vec<JiraSource>,

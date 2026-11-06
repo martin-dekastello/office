@@ -128,6 +128,96 @@ impl Snapshot {
     }
 }
 
+/// Rows that have scrolled off the top. vt100 has no getter, but it clamps.
+fn history_len(p: &mut Parser) -> usize {
+    let keep = p.screen().scrollback();
+    p.screen_mut().set_scrollback(usize::MAX);
+    let len = p.screen().scrollback();
+    p.screen_mut().set_scrollback(keep);
+    len
+}
+
+/// Text dragged over with the mouse. Lines count from the oldest row of
+/// history, so it stays on the same text when the view moves.
+#[derive(Debug, Clone, Copy)]
+pub struct Selection {
+    anchor: (usize, u16),
+    head: (usize, u16),
+    alt: bool,
+}
+
+impl Selection {
+    fn new(p: &mut Parser, row: u16, col: u16) -> Selection {
+        let at = Selection::point(p, row, col);
+        Selection { anchor: at, head: at, alt: p.screen().alternate_screen() }
+    }
+
+    fn point(p: &mut Parser, row: u16, col: u16) -> (usize, u16) {
+        (history_len(p) - p.screen().scrollback() + row as usize, col)
+    }
+
+    fn extend(&mut self, p: &mut Parser, row: u16, col: u16) {
+        self.head = Selection::point(p, row, col);
+    }
+
+    fn ordered(&self) -> ((usize, u16), (usize, u16)) {
+        (self.anchor.min(self.head), self.anchor.max(self.head))
+    }
+
+    /// The cells to highlight in the current view, as (row, from col, to col).
+    pub fn spans(&self, p: &mut Parser) -> Vec<(u16, u16, u16)> {
+        if self.alt != p.screen().alternate_screen() {
+            return Vec::new();
+        }
+        let (start, end) = self.ordered();
+        let top = history_len(p) - p.screen().scrollback();
+        let (rows, cols) = p.screen().size();
+        (0..rows)
+            .filter_map(|row| {
+                let line = top + row as usize;
+                if line < start.0 || line > end.0 {
+                    return None;
+                }
+                let from = if line == start.0 { start.1 } else { 0 };
+                let to = if line == end.0 { end.1 + 1 } else { cols };
+                Some((row, from, to.min(cols)))
+            })
+            .collect()
+    }
+
+    /// The selected text, a screen at a time because vt100 only reads what's in view.
+    fn text(&self, p: &mut Parser) -> String {
+        let mut out = String::new();
+        if self.alt != p.screen().alternate_screen() {
+            return out;
+        }
+        let (start, end) = self.ordered();
+        let history = history_len(p);
+        let keep = p.screen().scrollback();
+        let (rows, cols) = p.screen().size();
+        let mut line = start.0;
+        while line <= end.0 {
+            p.screen_mut().set_scrollback(history.saturating_sub(line));
+            let top = history - p.screen().scrollback();
+            let last = end.0.min(top + rows as usize - 1);
+            if line > last {
+                break;
+            }
+            let (first_row, last_row) = ((line - top) as u16, (last - top) as u16);
+            let from = if line == start.0 { start.1 } else { 0 };
+            let to = if last == end.0 { end.1 + 1 } else { cols };
+            let s = p.screen();
+            out.push_str(&s.contents_between(first_row, from, last_row, to.min(cols)));
+            if last < end.0 && !s.row_wrapped(last_row) {
+                out.push('\n');
+            }
+            line = last + 1;
+        }
+        p.screen_mut().set_scrollback(keep);
+        out
+    }
+}
+
 pub struct Pane {
     pub parser: Arc<Mutex<Parser>>,
     writer: Arc<Mutex<Box<dyn Write + Send>>>,
@@ -138,6 +228,7 @@ pub struct Pane {
     pub dirty: Arc<AtomicBool>,
     /// Lines scrolled back from the bottom (0 = live).
     pub scroll: usize,
+    pub selection: Option<Selection>,
 }
 
 impl Pane {
@@ -215,10 +306,12 @@ impl Pane {
             size: (rows, cols),
             dirty,
             scroll: 0,
+            selection: None,
         })
     }
 
     pub fn write(&mut self, bytes: &[u8]) {
+        self.selection = None;
         if self.scroll != 0 {
             self.scroll = 0;
             self.parser.lock().unwrap().screen_mut().set_scrollback(0);
@@ -235,6 +328,7 @@ impl Pane {
             return;
         }
         self.size = (rows, cols);
+        self.selection = None;
         let _ = self
             .master
             .resize(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 });
@@ -270,6 +364,10 @@ impl Pane {
 
     pub fn bracketed_paste(&self) -> bool {
         self.parser.lock().unwrap().screen().bracketed_paste()
+    }
+
+    pub fn alternate_screen(&self) -> bool {
+        self.parser.lock().unwrap().screen().alternate_screen()
     }
 
     /// Report a mouse event (in pane coordinates) to the child. False if it
@@ -319,18 +417,29 @@ impl Pane {
         self.dirty.store(true, Ordering::Relaxed);
     }
 
+    pub fn select_start(&mut self, row: u16, col: u16) {
+        self.selection = Some(Selection::new(&mut self.parser.lock().unwrap(), row, col));
+    }
+
+    pub fn select_to(&mut self, row: u16, col: u16) {
+        if let Some(sel) = &mut self.selection {
+            sel.extend(&mut self.parser.lock().unwrap(), row, col);
+        }
+    }
+
+    /// None if nothing was dragged over, or only blank cells were.
+    pub fn selected_text(&self) -> Option<String> {
+        let sel = self.selection.filter(|s| s.anchor != s.head)?;
+        Some(sel.text(&mut self.parser.lock().unwrap())).filter(|t| !t.trim().is_empty())
+    }
+
     pub fn snapshot(&self, history: &[u8]) -> Vec<u8> {
         encode(&mut self.parser.lock().unwrap(), history)
     }
 
     /// False on the alternate screen, or if nothing has scrolled off yet.
     pub fn has_scrollback(&self) -> bool {
-        let mut p = self.parser.lock().unwrap();
-        let keep = p.screen().scrollback();
-        p.screen_mut().set_scrollback(usize::MAX);
-        let any = p.screen().scrollback() > 0;
-        p.screen_mut().set_scrollback(keep);
-        any
+        history_len(&mut self.parser.lock().unwrap()) > 0
     }
 
     /// The session id Claude printed on exit.
@@ -422,6 +531,17 @@ mod tests {
     }
 
     #[test]
+    fn typing_and_resizing_clear_the_selection() {
+        let mut r = Recorder::start("");
+        r.pane.select_start(0, 0);
+        r.pane.write(b"x");
+        assert!(r.pane.selection.is_none());
+        r.pane.select_start(0, 0);
+        r.pane.resize(6, 40);
+        assert!(r.pane.selection.is_none());
+    }
+
+    #[test]
     fn main_screen_uses_local_scrollback() {
         let mut r = Recorder::start("1\\r\\n2\\r\\n3\\r\\n4\\r\\n5\\r\\n6\\r\\n7\\r\\n8\\r\\n");
         assert!(!r.pane.send_mouse(&wheel()));
@@ -446,6 +566,101 @@ mod snapshot_tests {
         for i in 0..n {
             p.process(format!("line {i}\r\n").as_bytes());
         }
+    }
+
+    fn selected(p: &mut Parser, from: (u16, u16), to: (u16, u16)) -> String {
+        let mut sel = Selection::new(p, from.0, from.1);
+        sel.extend(p, to.0, to.1);
+        sel.text(p)
+    }
+
+    #[test]
+    fn selection_reads_part_of_a_line() {
+        let mut p = parser(5, 20);
+        p.process(b"hello world\r\n");
+        assert_eq!(selected(&mut p, (0, 6), (0, 10)), "world");
+    }
+
+    #[test]
+    fn selection_spans_lines_in_either_direction() {
+        let mut p = parser(5, 20);
+        numbered(&mut p, 3);
+        assert_eq!(selected(&mut p, (0, 5), (2, 3)), "0\nline 1\nline");
+        assert_eq!(selected(&mut p, (2, 3), (0, 5)), "0\nline 1\nline");
+    }
+
+    #[test]
+    fn selection_joins_wrapped_lines() {
+        let mut p = parser(5, 10);
+        p.process(b"0123456789abcdef\r\nnext\r\n");
+        assert_eq!(selected(&mut p, (0, 0), (2, 3)), "0123456789abcdef\nnext");
+    }
+
+    #[test]
+    fn selection_keeps_wide_characters() {
+        let mut p = parser(5, 20);
+        p.process("a日本b\r\n".as_bytes());
+        assert_eq!(selected(&mut p, (0, 0), (0, 5)), "a日本b");
+    }
+
+    #[test]
+    fn selection_can_be_longer_than_a_screen() {
+        let mut p = parser(5, 20);
+        numbered(&mut p, 30);
+        p.screen_mut().set_scrollback(usize::MAX);
+        let mut sel = Selection::new(&mut p, 1, 0);
+        p.screen_mut().set_scrollback(0);
+        sel.extend(&mut p, 3, 6);
+        p.screen_mut().set_scrollback(7);
+        let want: Vec<String> = (1..30).map(|i| format!("line {i}")).collect();
+        assert_eq!(sel.text(&mut p), want.join("\n"));
+        assert_eq!(p.screen().scrollback(), 7);
+    }
+
+    #[test]
+    fn selection_joins_a_line_wrapped_across_a_screen_boundary() {
+        let mut p = parser(2, 4);
+        p.process(b"aaaabbbbccccdddd\r\nend\r\n");
+        p.screen_mut().set_scrollback(usize::MAX);
+        let mut sel = Selection::new(&mut p, 0, 0);
+        p.screen_mut().set_scrollback(0);
+        sel.extend(&mut p, 0, 2);
+        assert_eq!(sel.text(&mut p), "aaaabbbbccccdddd\nend");
+    }
+
+    #[test]
+    fn selection_stays_on_its_text_when_output_arrives() {
+        let mut p = parser(4, 20);
+        numbered(&mut p, 3);
+        let mut sel = Selection::new(&mut p, 1, 0);
+        sel.extend(&mut p, 1, 5);
+        assert_eq!(sel.spans(&mut p), [(1, 0, 6)]);
+        numbered(&mut p, 1);
+        assert_eq!(sel.spans(&mut p), [(0, 0, 6)]);
+        assert_eq!(sel.text(&mut p), "line 1");
+        numbered(&mut p, 5);
+        assert!(sel.spans(&mut p).is_empty());
+        assert_eq!(sel.text(&mut p), "line 1");
+    }
+
+    #[test]
+    fn selection_fills_the_rows_it_passes_through() {
+        let mut p = parser(5, 20);
+        numbered(&mut p, 3);
+        let mut sel = Selection::new(&mut p, 2, 4);
+        sel.extend(&mut p, 0, 2);
+        assert_eq!(sel.spans(&mut p), [(0, 2, 20), (1, 0, 20), (2, 0, 5)]);
+    }
+
+    #[test]
+    fn selection_belongs_to_the_screen_it_was_made_on() {
+        let mut p = parser(5, 20);
+        numbered(&mut p, 2);
+        let mut sel = Selection::new(&mut p, 0, 0);
+        sel.extend(&mut p, 0, 5);
+        p.process(b"\x1b[?1049h");
+        assert!(sel.spans(&mut p).is_empty());
+        assert_eq!(sel.text(&mut p), "");
     }
 
     #[test]
