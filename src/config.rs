@@ -156,6 +156,15 @@ pub fn expand(p: &Path) -> PathBuf {
     p.to_path_buf()
 }
 
+/// A path for display, with the home directory as "~".
+pub fn shorten(p: &Path) -> String {
+    match dirs::home_dir().and_then(|h| p.strip_prefix(h).ok().map(Path::to_path_buf)) {
+        Some(rest) if rest.as_os_str().is_empty() => "~".into(),
+        Some(rest) => Path::new("~").join(rest).display().to_string(),
+        None => p.display().to_string(),
+    }
+}
+
 impl Config {
     /// Load the config, writing a commented template on first run.
     pub fn load() -> Result<(Config, bool)> {

@@ -76,6 +76,12 @@ completes the path as in zsh: it fills in what it can, lists the matches, then c
 them (`Shift-Tab` goes back, `/` enters the selected folder). The tab keeps that directory
 when it restarts or resumes, and no worktree is created for it.
 
+Issues with no repo start their tabs in the default directory, which is your home directory
+until you change it. Press `p` to set it, in the same dialog as `C`. If you start office
+somewhere else, it offers to make that directory the default: `⏎` accepts, `Esc` keeps the
+current one, and it asks again next time. A tab keeps the directory it started in, so changing
+the default only affects new tabs and sessions always resume where they began.
+
 ## Keys
 
 The prefix (default `Ctrl-a`, tmux-style) works everywhere. Press it twice to send it
@@ -89,6 +95,7 @@ to the terminal.
 | `c` `t` `e` | new Claude / shell / note-editor tab |
 | `z` / `R` | suspend Claude tab / reopen closed Claude tab |
 | `C` | new Claude tab in a directory you type (`Tab` completes, empty = issue default) |
+| `p` | set the default directory for issues with no repo (`Tab` completes, empty = keep) |
 | `o` / `w` | open note in Obsidian / issue in browser |
 | `d` `a` `u` | move to done / archive / active |
 | `n` | new local issue |
@@ -100,7 +107,7 @@ to the terminal.
 | `s` / `Tab` | toggle focus between sidebar and terminal |
 | `1`–`9`, `h`/`l` | go to tab, previous/next tab |
 | `j` / `k` | next/previous issue |
-| `c` `C` `t` `e` `z` `R` `o` `d` `a` `n` `S` | same as in the sidebar |
+| `c` `C` `p` `t` `e` `z` `R` `o` `d` `a` `n` `S` | same as in the sidebar |
 | `x`, `,` | close tab, rename tab |
 | `[` `]` | scroll the tab back/forward (the mouse wheel works too) |
 | `?`, `q` | help, quit |

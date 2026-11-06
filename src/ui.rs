@@ -76,12 +76,15 @@ pub fn draw(app: &mut App, f: &mut Frame) {
     match app.mode.clone() {
         Mode::Help => draw_help(app, f, area),
         Mode::Prompt(kind, buf) => {
-            let title = match kind {
-                PromptKind::NewIssue => " New local issue — title ",
-                PromptKind::RenameTab => " Rename tab (empty = auto) ",
-                PromptKind::ClaudeDir => " New Claude tab — directory (Tab completes, empty = issue default) ",
+            let default = crate::config::shorten(&app.default_dir());
+            let title: String = match kind {
+                PromptKind::NewIssue => " New local issue — title ".into(),
+                PromptKind::RenameTab => " Rename tab (empty = auto) ".into(),
+                PromptKind::ClaudeDir => " New Claude tab — directory (Tab completes, empty = issue default) ".into(),
+                PromptKind::DefaultDir => format!(" Default directory — Tab completes, empty keeps {default} "),
+                PromptKind::StartupDir => format!(" Use as default directory? Esc keeps {default} "),
             };
-            draw_prompt(f, area, title, &buf, app.completion.as_ref());
+            draw_prompt(f, area, &title, &buf, app.completion.as_ref());
         }
         Mode::Confirm(kind) => {
             let q = match kind {
@@ -202,14 +205,14 @@ fn draw_sidebar(app: &mut App, f: &mut Frame, area: Rect) {
         vec![
             Line::from(Span::styled(" ⏎ open c claude t shell e note", Style::new().fg(FG_DIM))),
             Line::from(Span::styled(" o obsidian d done n new ? keys", Style::new().fg(FG_DIM))),
-            Line::from(Span::styled(" x close tab  q quit", Style::new().fg(FG_DIM))),
+            Line::from(Span::styled(" x close tab p default dir q quit", Style::new().fg(FG_DIM))),
             Line::from(Span::styled(" z suspend R reopen closed", Style::new().fg(FG_DIM))),
         ]
     } else {
         vec![
             Line::from(Span::styled(format!(" {p} s sidebar {p} j/k issue"), Style::new().fg(FG_DIM))),
             Line::from(Span::styled(format!(" {p} 1-9 tab {p} c new {p} ?"), Style::new().fg(FG_DIM))),
-            Line::from(Span::styled(format!(" {p} x close {p} q quit"), Style::new().fg(FG_DIM))),
+            Line::from(Span::styled(format!(" {p} x close {p} q quit {p} p dir"), Style::new().fg(FG_DIM))),
             Line::from(Span::styled(format!(" {p} z suspend {p} R reopen"), Style::new().fg(FG_DIM))),
         ]
     };
@@ -460,6 +463,7 @@ fn draw_help(app: &App, f: &mut Frame, area: Rect) {
         ("s / Tab".into(), "toggle sidebar ↔ terminal focus"),
         ("c / t / e".into(), "new Claude / shell / note-editor tab"),
         ("C".into(), "new Claude tab in a chosen directory (Tab completes)"),
+        ("p".into(), "set default directory (no-repo issues)"),
         ("1-9, h/l".into(), "go to tab, prev/next tab"),
         ("j / k".into(), "next/prev issue"),
         ("x  ,".into(), "close tab, rename tab"),

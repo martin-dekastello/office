@@ -157,6 +157,14 @@ pub enum PromptKind {
     NewIssue,
     RenameTab,
     ClaudeDir,
+    DefaultDir,
+    StartupDir,
+}
+
+impl PromptKind {
+    fn is_dir(&self) -> bool {
+        matches!(self, PromptKind::ClaudeDir | PromptKind::DefaultDir | PromptKind::StartupDir)
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -224,6 +232,21 @@ fn resolve_dir(input: &str) -> Option<PathBuf> {
     dir.is_dir().then_some(dir)
 }
 
+fn home() -> PathBuf {
+    dirs::home_dir().unwrap_or_else(|| PathBuf::from("."))
+}
+
+/// The saved default directory if it still exists, otherwise home.
+fn usable_default(saved: Option<&Path>, home: PathBuf) -> PathBuf {
+    saved.filter(|p| p.is_dir()).map_or(home, Path::to_path_buf)
+}
+
+/// The launch directory, if it isn't already the default.
+fn startup_dir(launch: &Path, default: &Path) -> Option<PathBuf> {
+    let launch = std::fs::canonicalize(launch).ok()?;
+    (std::fs::canonicalize(default).ok().as_ref() != Some(&launch)).then_some(launch)
+}
+
 impl App {
     pub fn new(cfg: Config, first_run: bool) -> Result<App> {
         let vault = Vault::new(cfg.notes_root())?;
@@ -276,6 +299,10 @@ impl App {
             app.flash(format!("Created {} — set your vault and sources there", crate::config::config_path().display()));
         } else if app.notes.is_empty() {
             app.flash("No issues yet: n = new local issue, S = sync GitHub/Jira".into());
+        }
+        let launch = std::env::current_dir().ok();
+        if let Some(dir) = launch.and_then(|d| startup_dir(&d, &app.default_dir())) {
+            app.mode = Mode::Prompt(PromptKind::StartupDir, crate::config::shorten(&dir));
         }
         app.start_sync();
         Ok(app)
@@ -493,28 +520,32 @@ impl App {
         }
     }
 
+    pub fn default_dir(&self) -> PathBuf {
+        usable_default(self.state.default_dir.as_deref(), home())
+    }
+
     /// Working directory for an issue, creating its worktree on first use.
-    fn workdir(&mut self, note: &Note) -> PathBuf {
-        let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+    /// None if the issue has no repo.
+    fn workdir(&mut self, note: &Note) -> Option<PathBuf> {
         if let Some(wt) = self.rt_for(&note.id).worktree.clone() {
             if wt.exists() {
-                return wt;
+                return Some(wt);
             }
         }
         let repo = note
             .repo_path
             .clone()
             .or_else(|| self.cfg.repo_path_for(&note.source, note.repo.as_deref()));
-        let Some(repo) = repo else { return home };
+        let repo = repo?;
         match worktree::ensure(&repo, &self.cfg.worktrees_dir, &note.stem()) {
             Ok(p) => {
                 self.rt_for(&note.id).worktree = Some(p.clone());
                 self.persist(&note.id);
-                p
+                Some(p)
             }
             Err(e) => {
                 self.flash(format!("Worktree failed, using repo: {e:#}"));
-                repo
+                Some(repo)
             }
         }
     }
@@ -525,7 +556,17 @@ impl App {
         let chosen = self.rt_for(id).tabs.get(idx).and_then(|t| t.st.cwd.clone());
         let cwd = match chosen.filter(|p| p.is_dir()) {
             Some(p) => p,
-            None => self.workdir(&note),
+            None => match self.workdir(&note) {
+                Some(p) => p,
+                None => {
+                    let default = self.default_dir();
+                    let Some(tab) = self.rt_for(id).tabs.get_mut(idx) else { return };
+                    let dir = tab.st.settle_dir(&default, &home());
+                    // Saved before Claude starts, so its session is never without one.
+                    self.persist(id);
+                    dir
+                }
+            },
         };
         let (rows, cols) = (self.term_rect.height.max(5), self.term_rect.width.max(20));
         let rt = self.rt_for(id);
@@ -612,6 +653,23 @@ impl App {
         } else {
             self.flash(format!("Not a directory: {dir}"));
             self.mode = Mode::Prompt(PromptKind::ClaudeDir, input);
+        }
+    }
+
+    /// Save a typed directory as the app's default; empty keeps the current one.
+    /// Tabs that already exist stay where they are.
+    fn set_default_dir(&mut self, kind: PromptKind, input: String) {
+        let dir = input.trim();
+        if dir.is_empty() {
+            return;
+        }
+        if let Some(p) = resolve_dir(dir) {
+            self.flash(format!("Default directory: {}", crate::config::shorten(&p)));
+            self.state.default_dir = Some(p);
+            self.state.save();
+        } else {
+            self.flash(format!("Not a directory: {dir}"));
+            self.mode = Mode::Prompt(kind, input);
         }
     }
 
@@ -1146,9 +1204,10 @@ impl App {
                             PromptKind::NewIssue => self.new_local_issue(buf),
                             PromptKind::RenameTab => self.rename_tab(buf),
                             PromptKind::ClaudeDir => self.new_claude_in(buf),
+                            PromptKind::DefaultDir | PromptKind::StartupDir => self.set_default_dir(kind, buf),
                         }
                     }
-                    KeyCode::Tab | KeyCode::BackTab if kind == PromptKind::ClaudeDir => {
+                    KeyCode::Tab | KeyCode::BackTab if kind.is_dir() => {
                         if !complete::tab(&mut buf, &mut completion, k.code == KeyCode::Tab) {
                             self.flash("No matching directories".into());
                         }
@@ -1270,6 +1329,7 @@ impl App {
                     self.flash("Select an issue first".into());
                 }
             }
+            KeyCode::Char('p') => self.mode = Mode::Prompt(PromptKind::DefaultDir, String::new()),
             KeyCode::Char('t') => self.new_tab(TabKind::Shell),
             KeyCode::Char('e') => self.new_tab(TabKind::Notes),
             KeyCode::Char('o') => self.open_obsidian(),
@@ -1339,7 +1399,7 @@ impl App {
                 self.cycle_tab(1);
                 self.view_tab();
             }
-            KeyCode::Char('h') | KeyCode::Left | KeyCode::Char('p') => {
+            KeyCode::Char('h') | KeyCode::Left => {
                 self.cycle_tab(-1);
                 self.view_tab();
             }
@@ -1461,6 +1521,39 @@ mod tests {
         assert_eq!(resolve_dir("~"), dirs::home_dir().and_then(|h| std::fs::canonicalize(h).ok()));
 
         std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn startup_asks_only_outside_the_default() {
+        let dir = std::env::temp_dir().join(format!("office-test-{}", uuid::Uuid::new_v4()));
+        let (a, b) = (dir.join("a"), dir.join("b"));
+        std::fs::create_dir_all(&a).unwrap();
+        std::fs::create_dir_all(&b).unwrap();
+
+        assert_eq!(startup_dir(&a, &a), None);
+        assert_eq!(startup_dir(&a.join("../a"), &a), None);
+        assert_eq!(startup_dir(&a, &b), std::fs::canonicalize(&a).ok());
+        assert_eq!(startup_dir(&dir.join("missing"), &a), None);
+        #[cfg(unix)]
+        {
+            let link = dir.join("link");
+            std::os::unix::fs::symlink(&a, &link).unwrap();
+            assert_eq!(startup_dir(&link, &a), None);
+        }
+
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn a_deleted_default_falls_back_to_home() {
+        let dir = std::env::temp_dir().join(format!("office-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let home = PathBuf::from("/home");
+
+        assert_eq!(usable_default(Some(&dir), home.clone()), dir);
+        assert_eq!(usable_default(None, home.clone()), home);
+        std::fs::remove_dir_all(&dir).ok();
+        assert_eq!(usable_default(Some(&dir), home.clone()), home);
     }
 
     #[test]
