@@ -326,12 +326,18 @@ fn draw_terminal(app: &mut App, f: &mut Frame, area: Rect) {
     let exited = pane.exited;
     let scroll = pane.scroll;
     {
-        let parser = pane.parser.lock().unwrap();
+        let mut parser = pane.parser.lock().unwrap();
         let mut cursor = Cursor::default();
         if !focused || exited.is_some() || scroll > 0 {
             cursor.hide();
         }
         f.render_widget(PseudoTerminal::new(parser.screen()).cursor(cursor), area);
+        if let Some(sel) = &pane.selection {
+            let style = Style::new().fg(Color::Black).bg(ACCENT);
+            for (row, from, to) in sel.spans(&mut parser) {
+                f.buffer_mut().set_style(Rect::new(area.x + from, area.y + row, to - from, 1).intersection(area), style);
+            }
+        }
     }
     if let Some(code) = exited {
         let r = Rect { y: area.y + area.height.saturating_sub(1), height: 1, ..area };

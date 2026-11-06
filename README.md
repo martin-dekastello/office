@@ -113,7 +113,13 @@ The mouse is captured so you can click issues and tabs, a tab's `×` to close it
 at the top of the sidebar. Both ask first. Inside a tab, the wheel, clicks and
 drags go to the app when it handles the mouse itself, as Claude Code does with
 `"tui": "fullscreen"`. Apps on the alternate screen that don't (`less`) get arrow keys from
-the wheel. Anything else scrolls office's scrollback. Hold Shift (Option in iTerm) to select text.
+the wheel. Anything else scrolls office's scrollback.
+
+In a shell tab, drag to select text. Letting go copies it, and the highlight stays until you
+click or type. Hold the mouse above or below the tab to scroll while selecting. Copying uses
+`pbcopy`, `clip`, or `wl-copy`/`xclip`/`xsel`, and also OSC 52 for SSH. Anywhere else, including
+Claude tabs and shell apps that handle the mouse themselves, hold Shift (Option in iTerm) to
+select text.
 
 ## How the Claude status works
 
@@ -147,6 +153,7 @@ src/
   ui.rs         ratatui rendering (sidebar, tab bar, terminal, popups)
   term.rs       PTY + vt100 pane (portable-pty, tui-term)
   keys.rs       key event -> terminal bytes
+  clipboard.rs  copy to the system clipboard and OSC 52
   vault.rs      Obsidian notes (active/done/archive), slugs, frontmatter
   providers.rs  GitHub (gh), Jira REST v3
   status.rs     Claude Code hook handler and settings

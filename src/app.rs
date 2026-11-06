@@ -1,3 +1,4 @@
+use crate::clipboard;
 use crate::complete::{self, Completion};
 use crate::config::Config;
 use crate::keys;
@@ -205,6 +206,8 @@ pub struct App {
     pub quit_hit: Rect,
     /// A mouse press went to the pane, so its drag and release go there too.
     pane_drag: bool,
+    /// The shell tab being selected in, and where the mouse last was.
+    pane_select: Option<(String, Position)>,
     pub item_hits: Vec<(Rect, String)>,
     last_scan: Instant,
     last_status: Instant,
@@ -254,6 +257,7 @@ impl App {
             close_hits: vec![],
             quit_hit: Rect::default(),
             pane_drag: false,
+            pane_select: None,
             item_hits: vec![],
             last_scan: Instant::now(),
             last_status: Instant::now(),
@@ -797,6 +801,7 @@ impl App {
 
     pub fn tick(&mut self) {
         self.poll_sync();
+        self.autoscroll_select();
         if self.last_spin.elapsed() >= Duration::from_millis(120) {
             self.spinner = self.spinner.wrapping_add(1);
             self.last_spin = Instant::now();
@@ -978,6 +983,79 @@ impl App {
         self.active_pane_mut().is_some_and(|p| p.send_mouse(&local))
     }
 
+    /// A press the pane's app didn't want starts a selection, in shell tabs only:
+    /// Claude Code handles its own.
+    fn start_select(&mut self, pos: Position) {
+        let r = self.term_rect;
+        self.pane_select = None;
+        if self.pane_drag {
+            return;
+        }
+        let Some(tab) = self.active_tab().filter(|t| t.st.kind == TabKind::Shell) else { return };
+        self.pane_select = Some((tab.st.id.clone(), pos));
+        if let Some(p) = self.active_pane_mut() {
+            p.select_start(pos.y - r.top(), pos.x - r.left());
+        }
+    }
+
+    /// The pane of the selection under way, unless its tab is no longer in view.
+    fn select_pane(&mut self) -> Option<&mut Pane> {
+        let id = self.pane_select.as_ref()?.0.clone();
+        self.active_tab().filter(|t| t.st.id == id)?;
+        self.active_pane_mut()
+    }
+
+    /// Stretch the selection to the mouse, clamped to the pane.
+    fn extend_select(&mut self) {
+        let r = self.term_rect;
+        let Some((_, pos)) = self.pane_select.clone() else { return };
+        if r.is_empty() {
+            return;
+        }
+        let row = pos.y.clamp(r.top(), r.bottom() - 1) - r.top();
+        let col = pos.x.clamp(r.left(), r.right() - 1) - r.left();
+        if let Some(p) = self.select_pane() {
+            p.select_to(row, col);
+        }
+    }
+
+    /// Scroll while the mouse is held above or below the pane.
+    fn autoscroll_select(&mut self) {
+        let r = self.term_rect;
+        let Some((_, pos)) = self.pane_select.clone() else { return };
+        let delta = if pos.y < r.top() {
+            1
+        } else if pos.y >= r.bottom() {
+            -1
+        } else {
+            return;
+        };
+        if let Some(p) = self.select_pane().filter(|p| !p.alternate_screen()) {
+            p.scroll_by(delta);
+            self.extend_select();
+        }
+    }
+
+    fn finish_select(&mut self) {
+        let Some(p) = self.select_pane() else {
+            self.pane_select = None;
+            return;
+        };
+        let text = p.selected_text();
+        if text.is_none() {
+            p.selection = None;
+        }
+        self.pane_select = None;
+        if let Some(text) = text {
+            let n = text.chars().count();
+            self.flash(if clipboard::copy(&text) {
+                format!("Copied {n} characters")
+            } else {
+                format!("Asked the terminal to copy {n} characters")
+            });
+        }
+    }
+
     fn on_mouse(&mut self, m: MouseEvent) {
         // A click must not change which tab an open prompt applies to, but a
         // release still has to end any drag in progress.
@@ -1003,6 +1081,7 @@ impl App {
                         self.focus = Focus::Terminal;
                     }
                     self.pane_drag = self.forward_mouse(m);
+                    self.start_select(pos);
                 } else if self.sidebar_rect.contains(pos) {
                     self.focus = Focus::Sidebar;
                 }
@@ -1017,6 +1096,13 @@ impl App {
                 self.forward_mouse(m);
                 self.pane_drag = false;
             }
+            MouseEventKind::Drag(_) if self.pane_select.is_some() => {
+                if let Some((_, last)) = &mut self.pane_select {
+                    *last = pos;
+                }
+                self.extend_select();
+            }
+            MouseEventKind::Up(_) if self.pane_select.is_some() => self.finish_select(),
             MouseEventKind::Moved if self.term_rect.contains(pos) => {
                 self.forward_mouse(m);
             }
@@ -1025,6 +1111,7 @@ impl App {
                 if self.term_rect.contains(pos) {
                     if !self.forward_mouse(m) {
                         self.scroll_active(if up { 3 } else { -3 });
+                        self.extend_select();
                     }
                 } else if self.sidebar_rect.contains(pos) {
                     self.move_selection(if up { -1 } else { 1 });
