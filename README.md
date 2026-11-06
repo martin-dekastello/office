@@ -85,6 +85,7 @@ to the terminal.
 | `d` `a` `u` | move to done / archive / active |
 | `n` | new local issue |
 | `S` | sync GitHub/Jira |
+| `x` / `q` | close tab / quit |
 
 | `prefix` then | |
 |---|---|
@@ -96,8 +97,8 @@ to the terminal.
 | `[` `]` | scroll back/forward (the mouse wheel works too) |
 | `?`, `q` | help, quit |
 
-The mouse is captured so you can click issues and tabs. Hold Shift (Option in iTerm)
-to select text.
+The mouse is captured so you can click issues and tabs, a tab's `×` to close it, and `quit`
+at the top of the sidebar. Both ask first. Hold Shift (Option in iTerm) to select text.
 
 ## How the Claude status works
 
