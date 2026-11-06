@@ -136,6 +136,8 @@ pub struct App {
     pub term_rect: Rect,
     pub sidebar_rect: Rect,
     pub tab_hits: Vec<(Rect, usize)>,
+    pub close_hits: Vec<(Rect, usize)>,
+    pub quit_hit: Rect,
     /// A mouse press went to the pane, so its drag and release go there too.
     pane_drag: bool,
     pub item_hits: Vec<(Rect, String)>,
@@ -182,6 +184,8 @@ impl App {
             term_rect: Rect::default(),
             sidebar_rect: Rect::default(),
             tab_hits: vec![],
+            close_hits: vec![],
+            quit_hit: Rect::default(),
             pane_drag: false,
             item_hits: vec![],
             last_scan: Instant::now(),
@@ -766,10 +770,20 @@ impl App {
     }
 
     fn on_mouse(&mut self, m: MouseEvent) {
+        // A click must not change which tab an open prompt applies to, but a
+        // release still has to end any drag in progress.
+        if self.mode != Mode::Normal && !matches!(m.kind, MouseEventKind::Up(_)) {
+            return;
+        }
         let pos = Position::new(m.column, m.row);
         match m.kind {
             MouseEventKind::Down(MouseButton::Left) => {
-                if let Some((_, i)) = self.tab_hits.iter().find(|(r, _)| r.contains(pos)).cloned() {
+                if self.quit_hit.contains(pos) {
+                    self.mode = Mode::Confirm(ConfirmKind::Quit);
+                } else if let Some((_, i)) = self.close_hits.iter().find(|(r, _)| r.contains(pos)).cloned() {
+                    self.switch_tab(i);
+                    self.mode = Mode::Confirm(ConfirmKind::CloseTab);
+                } else if let Some((_, i)) = self.tab_hits.iter().find(|(r, _)| r.contains(pos)).cloned() {
                     self.switch_tab(i);
                     self.open_issue();
                 } else if let Some((_, id)) = self.item_hits.iter().find(|(r, _)| r.contains(pos)).cloned() {
@@ -800,7 +814,7 @@ impl App {
             MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
                 let up = m.kind == MouseEventKind::ScrollUp;
                 if self.term_rect.contains(pos) {
-                    if self.mode == Mode::Normal && !self.forward_mouse(m) {
+                    if !self.forward_mouse(m) {
                         if let Some(p) = self.active_pane_mut() {
                             p.scroll_by(if up { 3 } else { -3 });
                         }

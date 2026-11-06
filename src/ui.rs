@@ -82,7 +82,7 @@ pub fn draw(app: &mut App, f: &mut Frame) {
         }
         Mode::Confirm(kind) => {
             let q = match kind {
-                ConfirmKind::Quit => "Quit office? Running sessions are stopped (Claude tabs resume next time). [y/N]",
+                ConfirmKind::Quit => "Quit office? Sessions stop; Claude tabs resume next time. [y/N]",
                 ConfirmKind::CloseTab => "Close this tab and stop its process? [y/N]",
             };
             draw_prompt(f, area, " Confirm ", q);
@@ -104,7 +104,7 @@ fn draw_sidebar(app: &mut App, f: &mut Frame, area: Rect) {
         Constraint::Length(1),
         Constraint::Length(2),
         Constraint::Min(1),
-        Constraint::Length(2),
+        Constraint::Length(3),
     ])
     .areas(inner);
 
@@ -122,6 +122,10 @@ fn draw_sidebar(app: &mut App, f: &mut Frame, area: Rect) {
         h.push(Span::styled(format!("  ● {attention}"), Style::new().fg(AMBER).add_modifier(Modifier::BOLD)));
     }
     f.render_widget(Paragraph::new(Line::from(h)), head);
+
+    let quit_w = 6.min(head.width);
+    app.quit_hit = Rect { x: head.right() - quit_w, width: quit_w, ..head };
+    f.render_widget(Paragraph::new(Span::styled(" quit ", Style::new().fg(FG_DIM))), app.quit_hit);
 
     let mut st = vec![Span::raw(" ")];
     for s in Stage::ALL {
@@ -194,11 +198,13 @@ fn draw_sidebar(app: &mut App, f: &mut Frame, area: Rect) {
         vec![
             Line::from(Span::styled(" ⏎ open c claude t shell e note", Style::new().fg(FG_DIM))),
             Line::from(Span::styled(" o obsidian d done n new ? keys", Style::new().fg(FG_DIM))),
+            Line::from(Span::styled(" x close tab  q quit", Style::new().fg(FG_DIM))),
         ]
     } else {
         vec![
             Line::from(Span::styled(format!(" {p} s sidebar {p} j/k issue"), Style::new().fg(FG_DIM))),
             Line::from(Span::styled(format!(" {p} 1-9 tab {p} c new {p} ?"), Style::new().fg(FG_DIM))),
+            Line::from(Span::styled(format!(" {p} x close {p} q quit"), Style::new().fg(FG_DIM))),
         ]
     };
     f.render_widget(Paragraph::new(foot_text), foot);
@@ -206,6 +212,7 @@ fn draw_sidebar(app: &mut App, f: &mut Frame, area: Rect) {
 
 fn draw_tabbar(app: &mut App, f: &mut Frame, area: Rect) {
     app.tab_hits.clear();
+    app.close_hits.clear();
     f.render_widget(Block::new().style(Style::new().bg(Color::Rgb(16, 16, 20))), area);
     let Some((tabs, active)) = app.current_tabs() else {
         let msg = if app.selected.is_some() {
@@ -228,6 +235,7 @@ fn draw_tabbar(app: &mut App, f: &mut Frame, area: Rect) {
     let mut spans = vec![];
     let mut x = area.x;
     let mut hits = vec![];
+    let mut close_hits = vec![];
     for (i, t) in tabs.iter().enumerate() {
         let (g, gs) = tab_glyph(t, app.spinner);
         let is_active = i == active;
@@ -240,12 +248,13 @@ fn draw_tabbar(app: &mut App, f: &mut Frame, area: Rect) {
         } else {
             Color::Rgb(160, 160, 172)
         };
-        let label = truncate(&format!("{}:{}", i + 1, t.st.name), max_w.saturating_sub(4));
+        let label = truncate(&format!("{}:{}", i + 1, t.st.name), max_w.saturating_sub(6));
         let text_style = Style::new().fg(fg).bg(bg).add_modifier(if is_active { Modifier::BOLD } else { Modifier::empty() });
         let parts = [
             Span::styled(" ", Style::new().bg(bg)),
             Span::styled(g, gs.bg(bg)),
             Span::styled(format!(" {label} "), text_style),
+            Span::styled("× ", Style::new().fg(FG_DIM).bg(bg)),
         ];
         let width: u16 = parts.iter().map(|s| s.width() as u16).sum();
         if x + width > area.x + area.width {
@@ -253,12 +262,14 @@ fn draw_tabbar(app: &mut App, f: &mut Frame, area: Rect) {
             break;
         }
         hits.push((Rect { x, y: area.y, width, height: 1 }, i));
+        close_hits.push((Rect { x: x + width - 2, y: area.y, width: 2, height: 1 }, i));
         spans.extend(parts);
         spans.push(Span::raw(" "));
         x += width + 1;
     }
     f.render_widget(Paragraph::new(Line::from(spans)), area);
     app.tab_hits = hits;
+    app.close_hits = close_hits;
 }
 
 fn draw_terminal(app: &mut App, f: &mut Frame, area: Rect) {
@@ -377,6 +388,7 @@ fn draw_help(app: &App, f: &mut Frame, area: Rect) {
         ("⏎ / l".into(), "open issue (start/resume active tab)"),
         ("1/2/3, h/v".into(), "view Active / Done / Archive"),
         ("Tab / Esc".into(), "back to terminal"),
+        ("x / q".into(), "close tab / quit"),
         ("".into(), ""),
         (format!("Anywhere: {p} then…"), ""),
         ("s / Tab".into(), "toggle sidebar ↔ terminal focus"),

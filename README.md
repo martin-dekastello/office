@@ -87,6 +87,7 @@ to the terminal.
 | `d` `a` `u` | move to done / archive / active |
 | `n` | new local issue |
 | `S` | sync GitHub/Jira |
+| `x` / `q` | close tab / quit |
 
 | `prefix` then | |
 |---|---|
@@ -98,7 +99,8 @@ to the terminal.
 | `[` `]` | scroll the tab back/forward (the mouse wheel works too) |
 | `?`, `q` | help, quit |
 
-The mouse is captured so you can click issues and tabs. Inside a tab, the wheel, clicks and
+The mouse is captured so you can click issues and tabs, a tab's `×` to close it, and `quit`
+at the top of the sidebar. Both ask first. Inside a tab, the wheel, clicks and
 drags go to the app when it handles the mouse itself, as Claude Code does with
 `"tui": "fullscreen"`. Apps on the alternate screen that don't (`less`) get arrow keys from
 the wheel. Anything else scrolls office's scrollback. Hold Shift (Option in iTerm) to select text.
