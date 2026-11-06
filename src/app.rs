@@ -1,9 +1,10 @@
 use crate::config::Config;
 use crate::keys;
 use crate::providers::{self, SyncReport};
-use crate::state::{IssueState, State, TabKind, TabState};
+use crate::state::{self, IssueState, State, TabKind, TabState};
 use crate::status::{self, ClaudeStatus};
-use crate::term::Pane;
+use crate::term::{Pane, Snapshot};
+use crate::transcript;
 use crate::vault::{NewNote, Note, Stage, Vault};
 use crate::worktree;
 use anyhow::Result;
@@ -20,6 +21,8 @@ use std::time::{Duration, Instant};
 
 /// How long after Esc a Claude tab may stay silent before it counts as interrupted.
 const INTERRUPT_SETTLE_MS: i64 = 1500;
+/// Closed Claude tabs kept per issue for reopening.
+const MAX_CLOSED: usize = 10;
 
 pub struct Tab {
     pub st: TabState,
@@ -29,11 +32,14 @@ pub struct Tab {
     pub seen_ts: i64,
     /// When Esc was sent while Claude was busy; cleared once that is resolved.
     pub esc_ts: Option<i64>,
+    /// Set when the process exits, until the tab is checked on the next poll;
+    /// true if it never got as far as a hook, as when `--resume` fails.
+    exit_check: Option<bool>,
 }
 
 impl Tab {
     fn new(st: TabState) -> Tab {
-        Tab { st, pane: None, status: ClaudeStatus::Exited, status_ts: 0, seen_ts: 0, esc_ts: None }
+        Tab { st, pane: None, status: ClaudeStatus::Exited, status_ts: 0, seen_ts: 0, esc_ts: None, exit_check: None }
     }
 
     /// Status as shown: "Done" turns into "Idle" once you've looked at the tab.
@@ -47,6 +53,49 @@ impl Tab {
 
     pub fn running(&self) -> bool {
         self.pane.as_ref().is_some_and(|p| p.exited.is_none())
+    }
+
+    /// A Claude session with no process: readable, and `--resume` continues it.
+    pub fn suspended(&self) -> bool {
+        self.st.kind == TabKind::Claude && self.pane.is_none() && self.st.claude_session.is_some()
+    }
+
+    /// False for a session with no messages yet, which `--resume` can't find.
+    fn resumable(&self) -> bool {
+        let Some(sid) = &self.st.claude_session else { return false };
+        match status::read_status(&self.st.id) {
+            Some(sf) if sf.session_id.as_ref() == Some(sid) => {
+                sf.transcript.is_none_or(|t| Path::new(&t).exists())
+            }
+            _ => true,
+        }
+    }
+
+    /// Save the screen, with the conversation above it if the terminal kept none.
+    fn save_screen(&self) {
+        let Some(p) = &self.pane else { return };
+        let mut history = vec![];
+        if !p.has_scrollback() {
+            if let Some(t) = status::read_status(&self.st.id).and_then(|s| s.transcript) {
+                history = transcript::history(Path::new(&t));
+            }
+        }
+        state::write_snapshot(&self.st.id, &p.snapshot(&history));
+    }
+
+    /// Apply the hook status file. Returns the session id if it's a new one.
+    fn sync_status(&mut self) -> Option<String> {
+        let sf = status::read_status(&self.st.id)?;
+        if sf.ts > self.status_ts || sf.status != self.status {
+            self.status = sf.status;
+            self.status_ts = sf.ts;
+        }
+        let sid = sf.session_id?;
+        if self.st.claude_session.as_ref() == Some(&sid) {
+            return None;
+        }
+        self.st.claude_session = Some(sid.clone());
+        Some(sid)
     }
 
     fn busy(&self) -> bool {
@@ -74,6 +123,7 @@ pub struct IssueRt {
     pub tabs: Vec<Tab>,
     pub active: usize,
     pub worktree: Option<PathBuf>,
+    pub closed: Vec<TabState>,
 }
 
 impl IssueRt {
@@ -83,6 +133,14 @@ impl IssueRt {
             .filter(|t| t.st.kind == TabKind::Claude && t.pane.is_some())
             .map(|t| t.shown_status())
             .max_by_key(|s| s.urgency())
+    }
+
+    /// Remember a closed tab, forgetting the oldest beyond MAX_CLOSED.
+    fn push_closed(&mut self, st: TabState) {
+        self.closed.push(st);
+        if self.closed.len() > MAX_CLOSED {
+            state::remove_snapshot(&self.closed.remove(0).id);
+        }
     }
 }
 
@@ -103,6 +161,7 @@ pub enum PromptKind {
 pub enum ConfirmKind {
     Quit,
     CloseTab,
+    Suspend,
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -121,6 +180,9 @@ pub struct App {
     pub view: Stage,
     pub selected: Option<String>,
     pub rt: HashMap<String, IssueRt>,
+    /// Saved screen of the suspended tab on view, by tab id. Only one is ever
+    /// loaded, so suspended tabs cost no memory.
+    pub viewer: Option<(String, Snapshot)>,
     pub state: State,
     pub focus: Focus,
     pub mode: Mode,
@@ -170,6 +232,7 @@ impl App {
             notes,
             view: Stage::Active,
             rt: HashMap::new(),
+            viewer: None,
             state,
             focus: Focus::Sidebar,
             mode: Mode::Normal,
@@ -383,6 +446,7 @@ impl App {
                 active: st.active_tab.min(st.tabs.len().saturating_sub(1)),
                 worktree: st.worktree.clone(),
                 tabs: st.tabs.into_iter().map(Tab::new).collect(),
+                closed: st.closed,
             };
             self.rt.insert(id.to_string(), rt);
         }
@@ -414,6 +478,7 @@ impl App {
                     worktree: rt.worktree.clone(),
                     tabs: rt.tabs.iter().map(|t| t.st.clone()).collect(),
                     active_tab: rt.active,
+                    closed: rt.closed.clone(),
                 },
             );
             self.state.save();
@@ -492,6 +557,7 @@ impl App {
                 tab.pane = Some(p);
                 tab.status = if st.kind == TabKind::Claude { ClaudeStatus::Starting } else { ClaudeStatus::Idle };
                 tab.status_ts = now_ms();
+                state::remove_snapshot(&st.id);
             }
             Err(e) => self.flash(format!("Spawn failed: {e:#}")),
         }
@@ -556,6 +622,16 @@ impl App {
         self.focus = Focus::Terminal;
     }
 
+    /// Show the active tab after moving to it. A suspended tab stays stopped,
+    /// so it can be read without starting Claude.
+    fn view_tab(&mut self) {
+        if self.active_tab().is_some_and(Tab::suspended) {
+            self.focus = Focus::Terminal;
+        } else {
+            self.open_issue();
+        }
+    }
+
     fn switch_tab(&mut self, idx: usize) {
         let Some(id) = self.selected.clone() else { return };
         let rt = self.rt_for(&id);
@@ -582,15 +658,129 @@ impl App {
             return;
         }
         let mut t = rt.tabs.remove(rt.active);
+        let reopenable = t.st.kind == TabKind::Claude && t.resumable();
+        if reopenable {
+            t.save_screen();
+        }
         if let Some(p) = t.pane.as_mut() {
             p.kill();
         }
         status::clear_status(&t.st.id);
+        if reopenable {
+            rt.push_closed(t.st);
+        } else {
+            state::remove_snapshot(&t.st.id);
+        }
         rt.active = rt.active.min(rt.tabs.len().saturating_sub(1));
         if rt.tabs.is_empty() {
             self.focus = Focus::Sidebar;
         }
         self.persist(&id);
+    }
+
+    /// Bring back the most recently closed Claude tab, still suspended.
+    fn reopen_tab(&mut self) {
+        let Some(id) = self.selected.clone() else { return };
+        let rt = self.rt_for(&id);
+        let Some(st) = rt.closed.pop() else {
+            self.flash("No closed Claude tabs for this issue".into());
+            return;
+        };
+        rt.tabs.push(Tab::new(st));
+        rt.active = rt.tabs.len() - 1;
+        self.persist(&id);
+        self.focus = Focus::Terminal;
+    }
+
+    /// Save a tab's screen and stop its process, leaving it suspended.
+    fn park(&mut self, id: &str, idx: usize) {
+        let Some(t) = self.rt.get_mut(id).and_then(|rt| rt.tabs.get_mut(idx)) else { return };
+        t.save_screen();
+        t.pane = None;
+        t.esc_ts = None;
+        t.exit_check = None;
+        self.persist(id);
+    }
+
+    fn request_suspend(&mut self) {
+        let Some(t) = self.active_tab() else { return };
+        if t.st.kind != TabKind::Claude {
+            self.flash("Only Claude tabs can be suspended".into());
+        } else if !t.running() {
+            self.flash("This tab isn't running".into());
+        } else if !t.resumable() {
+            self.flash("Nothing to resume yet: this session has no messages".into());
+        } else if t.busy() || t.status == ClaudeStatus::Starting {
+            self.mode = Mode::Confirm(ConfirmKind::Suspend);
+        } else {
+            self.suspend_tab();
+        }
+    }
+
+    fn suspend_tab(&mut self) {
+        let Some(id) = self.selected.clone() else { return };
+        let idx = self.rt_for(&id).active;
+        self.park(&id, idx);
+        self.flash("Suspended: process stopped, ⏎ resumes".into());
+    }
+
+    /// Before quitting: keep Claude tabs readable, and don't leave a session
+    /// id behind that `--resume` can't find.
+    fn save_sessions(&mut self) {
+        let ids: Vec<String> = self.rt.keys().cloned().collect();
+        for id in ids {
+            let rt = self.rt_for(&id);
+            for t in rt.tabs.iter_mut().filter(|t| t.st.kind == TabKind::Claude) {
+                if t.pane.is_none() {
+                    continue;
+                }
+                if t.resumable() {
+                    t.save_screen();
+                } else {
+                    t.st.claude_session = None;
+                }
+            }
+            self.persist(&id);
+        }
+    }
+
+    fn active_tab(&self) -> Option<&Tab> {
+        let rt = self.current_rt()?;
+        rt.tabs.get(rt.active)
+    }
+
+    fn can_focus_terminal(&self) -> bool {
+        self.active_tab().is_some_and(|t| t.pane.is_some() || t.suspended())
+    }
+
+    fn scroll_active(&mut self, delta: isize) {
+        if let Some(p) = self.active_pane_mut() {
+            p.scroll_by(delta);
+        } else if let Some((_, s)) = self.viewer.as_mut() {
+            s.scroll_by(delta);
+        }
+    }
+
+    fn scroll_page(&mut self, up: bool) {
+        let lines = (self.term_rect.height as isize / 2).max(1);
+        if let Some(p) = self.active_pane_mut() {
+            p.scroll_page(up, lines);
+        } else {
+            self.scroll_active(if up { lines } else { -lines });
+        }
+    }
+
+    /// Load the saved screen of the suspended tab on view, and only that one.
+    pub fn sync_viewer(&mut self) {
+        let rows = self.term_rect.height.saturating_sub(1);
+        let Some(tab) = self.active_tab().filter(|t| t.suspended()).map(|t| t.st.id.clone()) else {
+            self.viewer = None;
+            return;
+        };
+        if self.viewer.as_ref().is_some_and(|(id, s)| *id == tab && s.rows == rows) {
+            return;
+        }
+        self.viewer = Snapshot::load(&state::snapshot_path(&tab), rows).map(|s| (tab, s));
     }
 
     fn active_pane_mut(&mut self) -> Option<&mut Pane> {
@@ -634,6 +824,7 @@ impl App {
         let selected = self.selected.clone();
         let mut new_sessions: Vec<(String, String, String)> = vec![];
         let mut renamed: Vec<String> = vec![];
+        let mut stopped: Vec<(String, usize)> = vec![];
         for (issue, rt) in self.rt.iter_mut() {
             let active = rt.active;
             for (i, t) in rt.tabs.iter_mut().enumerate() {
@@ -642,25 +833,35 @@ impl App {
                 }
                 let visible = selected.as_deref() == Some(issue.as_str()) && i == active;
                 let before = t.shown_status();
-                let (exited, title, bell) = {
+                let (was_exited, exited, title, bell) = {
                     let p = t.pane.as_mut().unwrap();
-                    (p.poll_exit(), p.title(), p.take_bell())
+                    (p.exited.is_some(), p.poll_exit(), p.title(), p.take_bell())
                 };
+                let claude = t.st.kind == TabKind::Claude;
+                if claude && !was_exited {
+                    if let Some(sid) = t.sync_status() {
+                        new_sessions.push((issue.clone(), sid, t.st.name.clone()));
+                    }
+                }
                 if exited {
-                    t.status = ClaudeStatus::Exited;
-                } else if t.st.kind == TabKind::Claude {
-                    if let Some(sf) = status::read_status(&t.st.id) {
-                        if sf.ts > t.status_ts || sf.status != t.status {
-                            t.status = sf.status;
-                            t.status_ts = sf.ts;
+                    if claude && !was_exited {
+                        t.exit_check = Some(t.status == ClaudeStatus::Starting);
+                    } else if let Some(no_hooks) = t.exit_check.take() {
+                        // A poll later, so the reader has the last of the output.
+                        let hint = t.pane.as_ref().and_then(Pane::resume_id);
+                        if let (None, Some(sid)) = (&t.st.claude_session, &hint) {
+                            t.st.claude_session = Some(sid.clone());
+                            new_sessions.push((issue.clone(), sid.clone(), t.st.name.clone()));
                         }
-                        if let Some(sid) = sf.session_id {
-                            if t.st.claude_session.as_deref() != Some(&sid) {
-                                t.st.claude_session = Some(sid.clone());
-                                new_sessions.push((issue.clone(), sid, t.st.name.clone()));
-                            }
+                        if !t.resumable() {
+                            t.st.claude_session = None;
+                            renamed.push(issue.clone());
+                        } else if !no_hooks || hint.is_some() {
+                            stopped.push((issue.clone(), i));
                         }
                     }
+                    t.status = ClaudeStatus::Exited;
+                } else if claude {
                     if t.take_interrupt(now) {
                         status::mark_interrupted(&t.st.id);
                     }
@@ -690,6 +891,9 @@ impl App {
                 );
             }
             self.persist(&issue);
+        }
+        for (issue, idx) in stopped {
+            self.park(&issue, idx);
         }
         renamed.sort();
         renamed.dedup();
@@ -785,12 +989,12 @@ impl App {
                     self.mode = Mode::Confirm(ConfirmKind::CloseTab);
                 } else if let Some((_, i)) = self.tab_hits.iter().find(|(r, _)| r.contains(pos)).cloned() {
                     self.switch_tab(i);
-                    self.open_issue();
+                    self.view_tab();
                 } else if let Some((_, id)) = self.item_hits.iter().find(|(r, _)| r.contains(pos)).cloned() {
                     self.select_id(id);
                     self.focus = Focus::Sidebar;
                 } else if self.term_rect.contains(pos) {
-                    if self.active_pane_mut().is_some() {
+                    if self.can_focus_terminal() {
                         self.focus = Focus::Terminal;
                     }
                     self.pane_drag = self.forward_mouse(m);
@@ -815,9 +1019,7 @@ impl App {
                 let up = m.kind == MouseEventKind::ScrollUp;
                 if self.term_rect.contains(pos) {
                     if !self.forward_mouse(m) {
-                        if let Some(p) = self.active_pane_mut() {
-                            p.scroll_by(if up { 3 } else { -3 });
-                        }
+                        self.scroll_active(if up { 3 } else { -3 });
                     }
                 } else if self.sidebar_rect.contains(pos) {
                     self.move_selection(if up { -1 } else { 1 });
@@ -838,6 +1040,7 @@ impl App {
                     match kind {
                         ConfirmKind::Quit => self.quit = true,
                         ConfirmKind::CloseTab => self.close_tab(),
+                        ConfirmKind::Suspend => self.suspend_tab(),
                     }
                 }
             }
@@ -888,6 +1091,20 @@ impl App {
             }
             return;
         };
+        if tab.suspended() {
+            let page = (self.term_rect.height as isize / 2).max(1);
+            match k.code {
+                KeyCode::Enter => self.spawn_pane(&id, idx),
+                KeyCode::Up => self.scroll_active(1),
+                KeyCode::Down => self.scroll_active(-1),
+                KeyCode::PageUp => self.scroll_active(page),
+                KeyCode::PageDown => self.scroll_active(-page),
+                KeyCode::Char('g') | KeyCode::Home => self.scroll_active(isize::MAX / 2),
+                KeyCode::Char('G') | KeyCode::End => self.scroll_active(isize::MIN / 2),
+                _ => {}
+            }
+            return;
+        }
         if k.code == KeyCode::Esc && tab.st.kind == TabKind::Claude && tab.busy() {
             tab.esc_ts = Some(now_ms());
         }
@@ -926,7 +1143,7 @@ impl App {
                 self.set_view(next);
             }
             KeyCode::Tab | KeyCode::Esc => {
-                if self.active_pane_mut().is_some() {
+                if self.can_focus_terminal() {
                     self.focus = Focus::Terminal;
                 }
             }
@@ -976,6 +1193,8 @@ impl App {
                     self.mode = Mode::Confirm(ConfirmKind::CloseTab);
                 }
             }
+            KeyCode::Char('z') => self.request_suspend(),
+            KeyCode::Char('R') => self.reopen_tab(),
             KeyCode::Char(',') => {
                 if let Some(rt) = self.current_rt() {
                     if let Some(t) = rt.tabs.get(rt.active) {
@@ -1000,23 +1219,23 @@ impl App {
         }
         match k.code {
             KeyCode::Char('s') | KeyCode::Tab => {
-                let has_pane = self.active_pane_mut().is_some();
+                let can_focus = self.can_focus_terminal();
                 self.focus = match self.focus {
-                    Focus::Sidebar if has_pane => Focus::Terminal,
+                    Focus::Sidebar if can_focus => Focus::Terminal,
                     _ => Focus::Sidebar,
                 };
             }
             KeyCode::Char(c @ '1'..='9') => {
                 self.switch_tab(c as usize - '1' as usize);
-                self.open_issue();
+                self.view_tab();
             }
             KeyCode::Char('l') | KeyCode::Right => {
                 self.cycle_tab(1);
-                self.open_issue();
+                self.view_tab();
             }
             KeyCode::Char('h') | KeyCode::Left | KeyCode::Char('p') => {
                 self.cycle_tab(-1);
-                self.open_issue();
+                self.view_tab();
             }
             KeyCode::Char('j') | KeyCode::Down => {
                 self.move_selection(1);
@@ -1027,16 +1246,10 @@ impl App {
                 self.after_issue_switch();
             }
             KeyCode::Char('[') | KeyCode::PageUp => {
-                let h = self.term_rect.height as isize / 2;
-                if let Some(p) = self.active_pane_mut() {
-                    p.scroll_page(true, h.max(1));
-                }
+                self.scroll_page(true);
             }
             KeyCode::Char(']') | KeyCode::PageDown => {
-                let h = self.term_rect.height as isize / 2;
-                if let Some(p) = self.active_pane_mut() {
-                    p.scroll_page(false, h.max(1));
-                }
+                self.scroll_page(false);
             }
             _ => {
                 self.on_command(k);
@@ -1047,7 +1260,7 @@ impl App {
     /// When jumping issues from the terminal, stay in the terminal if the
     /// target issue already has a running tab.
     fn after_issue_switch(&mut self) {
-        if self.focus == Focus::Terminal && self.active_pane_mut().is_none() {
+        if self.focus == Focus::Terminal && !self.can_focus_terminal() {
             self.focus = Focus::Sidebar;
         }
     }
@@ -1072,12 +1285,26 @@ impl App {
             .filter(|t| t.st.kind == TabKind::Claude && t.running())
             .count()
     }
+
+    pub fn suspended_claude_tabs(&self) -> usize {
+        let loaded = self.rt.values().flat_map(|r| r.tabs.iter()).filter(|t| t.suspended()).count();
+        let saved = self
+            .state
+            .issues
+            .iter()
+            .filter(|(id, _)| !self.rt.contains_key(*id))
+            .flat_map(|(_, s)| s.tabs.iter())
+            .filter(|t| t.kind == TabKind::Claude && t.claude_session.is_some())
+            .count();
+        loaded + saved
+    }
 }
 
 /// Main loop.
 pub fn run(app: &mut App, terminal: &mut ratatui::DefaultTerminal) -> Result<()> {
     while !app.quit {
         app.tick();
+        app.sync_viewer();
         terminal.draw(|f| crate::ui::draw(app, f))?;
         app.resize_visible();
         app.ring_bell_if_needed();
@@ -1092,6 +1319,7 @@ pub fn run(app: &mut App, terminal: &mut ratatui::DefaultTerminal) -> Result<()>
             }
         }
     }
+    app.save_sessions();
     app.state.selected = app.selected.clone();
     app.state.save();
     Ok(())
@@ -1127,6 +1355,28 @@ mod tests {
         assert_eq!(resolve_dir("~"), dirs::home_dir().and_then(|h| std::fs::canonicalize(h).ok()));
 
         std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn only_a_claude_tab_with_a_session_is_suspended() {
+        let mut t = tab(ClaudeStatus::Exited, 0, None);
+        assert!(!t.suspended());
+        t.st.claude_session = Some("s".into());
+        assert!(t.suspended());
+        t.st.kind = TabKind::Shell;
+        assert!(!t.suspended());
+    }
+
+    #[test]
+    fn closed_tabs_are_capped_oldest_first() {
+        let mut rt = IssueRt::default();
+        for i in 0..MAX_CLOSED + 2 {
+            let mut st = tab(ClaudeStatus::Exited, 0, None).st;
+            st.id = format!("office-test-no-snapshot-{i}");
+            rt.push_closed(st);
+        }
+        assert_eq!(rt.closed.len(), MAX_CLOSED);
+        assert_eq!(rt.closed[0].id, "office-test-no-snapshot-2");
     }
 
     #[test]

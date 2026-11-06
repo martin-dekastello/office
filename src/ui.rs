@@ -1,6 +1,7 @@
 use crate::app::{App, ConfirmKind, Focus, Mode, PromptKind, Tab};
 use crate::state::TabKind;
 use crate::status::ClaudeStatus;
+use crate::term::Snapshot;
 use crate::vault::Stage;
 use ratatui::layout::{Alignment, Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -83,7 +84,8 @@ pub fn draw(app: &mut App, f: &mut Frame) {
         Mode::Confirm(kind) => {
             let q = match kind {
                 ConfirmKind::Quit => "Quit office? Sessions stop; Claude tabs resume next time. [y/N]",
-                ConfirmKind::CloseTab => "Close this tab and stop its process? [y/N]",
+                ConfirmKind::CloseTab => "Close this tab and stop its process? (R reopens Claude tabs) [y/N]",
+                ConfirmKind::Suspend => "Claude isn't idle, so this interrupts it. Suspend anyway? [y/N]",
             };
             draw_prompt(f, area, " Confirm ", q);
         }
@@ -104,7 +106,7 @@ fn draw_sidebar(app: &mut App, f: &mut Frame, area: Rect) {
         Constraint::Length(1),
         Constraint::Length(2),
         Constraint::Min(1),
-        Constraint::Length(3),
+        Constraint::Length(4),
     ])
     .areas(inner);
 
@@ -199,12 +201,14 @@ fn draw_sidebar(app: &mut App, f: &mut Frame, area: Rect) {
             Line::from(Span::styled(" ⏎ open c claude t shell e note", Style::new().fg(FG_DIM))),
             Line::from(Span::styled(" o obsidian d done n new ? keys", Style::new().fg(FG_DIM))),
             Line::from(Span::styled(" x close tab  q quit", Style::new().fg(FG_DIM))),
+            Line::from(Span::styled(" z suspend R reopen closed", Style::new().fg(FG_DIM))),
         ]
     } else {
         vec![
             Line::from(Span::styled(format!(" {p} s sidebar {p} j/k issue"), Style::new().fg(FG_DIM))),
             Line::from(Span::styled(format!(" {p} 1-9 tab {p} c new {p} ?"), Style::new().fg(FG_DIM))),
             Line::from(Span::styled(format!(" {p} x close {p} q quit"), Style::new().fg(FG_DIM))),
+            Line::from(Span::styled(format!(" {p} z suspend {p} R reopen"), Style::new().fg(FG_DIM))),
         ]
     };
     f.render_widget(Paragraph::new(foot_text), foot);
@@ -299,6 +303,10 @@ fn draw_terminal(app: &mut App, f: &mut Frame, area: Rect) {
         return;
     };
     let Some(pane) = &tab.pane else {
+        if let Some((_, snap)) = app.viewer.as_ref().filter(|(id, _)| *id == tab.st.id) {
+            draw_snapshot(snap, &app.prefix_label(), f, area);
+            return;
+        }
         let what = match (&tab.st.kind, &tab.st.claude_session) {
             (TabKind::Claude, Some(sid)) => format!("Claude session {sid} is suspended.\n\n⏎ resume it"),
             (TabKind::Claude, None) => "Claude tab is not running.\n\n⏎ start it".into(),
@@ -332,11 +340,32 @@ fn draw_terminal(app: &mut App, f: &mut Frame, area: Rect) {
             r,
         );
     } else if scroll > 0 {
-        let label = format!(" ↑ {scroll} ");
-        let w = label.len() as u16;
-        let r = Rect { x: area.x + area.width.saturating_sub(w), y: area.y, width: w, height: 1 };
-        f.render_widget(Paragraph::new(label).style(Style::new().fg(Color::Black).bg(ACCENT)), r);
+        draw_scroll_label(f, area, scroll);
     }
+}
+
+/// A suspended tab's saved screen. The bar gets its own row, right under
+/// Claude's input box, which otherwise looks live.
+fn draw_snapshot(snap: &Snapshot, prefix: &str, f: &mut Frame, area: Rect) {
+    let [screen, bar] = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(area);
+    let mut cursor = Cursor::default();
+    cursor.hide();
+    f.render_widget(PseudoTerminal::new(snap.parser.screen()).cursor(cursor), screen);
+    f.render_widget(
+        Paragraph::new(format!(" – suspended · read-only · ⏎ resume · ↑↓ scroll · {prefix} x close"))
+            .style(Style::new().fg(Color::Black).bg(ACCENT)),
+        bar,
+    );
+    if snap.scroll > 0 {
+        draw_scroll_label(f, screen, snap.scroll);
+    }
+}
+
+fn draw_scroll_label(f: &mut Frame, area: Rect, scroll: usize) {
+    let label = format!(" ↑ {scroll} ");
+    let w = label.len() as u16;
+    let r = Rect { x: area.x + area.width.saturating_sub(w), y: area.y, width: w, height: 1 };
+    f.render_widget(Paragraph::new(label).style(Style::new().fg(Color::Black).bg(ACCENT)), r);
 }
 
 fn draw_statusbar(app: &mut App, f: &mut Frame, area: Rect) {
@@ -358,7 +387,11 @@ fn draw_statusbar(app: &mut App, f: &mut Frame, area: Rect) {
         .map(|n| format!("⎇ {}", n.to_string_lossy()))
         .unwrap_or_default();
     let running = app.running_claude_tabs();
-    let right = format!("{wt}  {running} claude  {} ? help ", app.prefix_label());
+    let suspended = match app.suspended_claude_tabs() {
+        0 => String::new(),
+        n => format!("{n} suspended  "),
+    };
+    let right = format!("{wt}  {running} claude  {suspended}{} ? help ", app.prefix_label());
     let rw = right.chars().count() as u16;
     f.render_widget(Paragraph::new(Line::from(left)), Rect { width: area.width.saturating_sub(rw + 1), ..area });
     f.render_widget(
@@ -397,6 +430,7 @@ fn draw_help(app: &App, f: &mut Frame, area: Rect) {
         ("1-9, h/l".into(), "go to tab, prev/next tab"),
         ("j / k".into(), "next/prev issue"),
         ("x  ,".into(), "close tab, rename tab"),
+        ("z / R".into(), "suspend Claude tab / reopen closed tab"),
         ("o / w".into(), "open note in Obsidian / issue in browser"),
         ("d / a / u".into(), "move issue to done / archive / active"),
         ("n".into(), "new local issue"),
@@ -406,6 +440,7 @@ fn draw_help(app: &App, f: &mut Frame, area: Rect) {
         ("q".into(), "quit"),
         ("".into(), ""),
         ("Status".into(), "✳ working  ● needs you  ● done  ○ idle  ✕ exited"),
+        ("".into(), "– suspended (⏎ resumes, scrolling still works)"),
     ];
     let lines: Vec<Line> = rows
         .iter()
