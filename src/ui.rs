@@ -81,7 +81,7 @@ pub fn draw(app: &mut App, f: &mut Frame) {
         }
         Mode::Confirm(kind) => {
             let q = match kind {
-                ConfirmKind::Quit => "Quit issuedeck? Running sessions are stopped (Claude tabs resume next time). [y/N]",
+                ConfirmKind::Quit => "Quit office? Running sessions are stopped (Claude tabs resume next time). [y/N]",
                 ConfirmKind::CloseTab => "Close this tab and stop its process? [y/N]",
             };
             draw_prompt(f, area, " Confirm ", q);
@@ -113,7 +113,7 @@ fn draw_sidebar(app: &mut App, f: &mut Frame, area: Rect) {
         .flat_map(|r| r.tabs.iter())
         .filter(|t| t.pane.is_some() && t.shown_status() == ClaudeStatus::Attention)
         .count();
-    let mut h = vec![Span::styled(" issuedeck", Style::new().fg(FG).add_modifier(Modifier::BOLD))];
+    let mut h = vec![Span::styled(" office", Style::new().fg(FG).add_modifier(Modifier::BOLD))];
     if app.syncing {
         h.push(Span::styled(format!("  {} sync", SPIN[app.spinner % 6]), Style::new().fg(FG_DIM)));
     }

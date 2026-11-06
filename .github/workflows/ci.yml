@@ -17,7 +17,7 @@ jobs:
       - run: cargo build --release
       - uses: actions/upload-artifact@v4
         with:
-          name: issuedeck-${{ matrix.os }}
+          name: office-${{ matrix.os }}
           path: |
-            target/release/issuedeck
-            target/release/issuedeck.exe
+            target/release/office
+            target/release/office.exe

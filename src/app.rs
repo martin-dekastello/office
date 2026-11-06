@@ -18,17 +18,22 @@ use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver};
 use std::time::{Duration, Instant};
 
+/// How long after Esc a Claude tab may stay silent before it counts as interrupted.
+const INTERRUPT_SETTLE_MS: i64 = 1500;
+
 pub struct Tab {
     pub st: TabState,
     pub pane: Option<Pane>,
     pub status: ClaudeStatus,
     pub status_ts: i64,
     pub seen_ts: i64,
+    /// When Esc was sent while Claude was busy; cleared once that is resolved.
+    pub esc_ts: Option<i64>,
 }
 
 impl Tab {
     fn new(st: TabState) -> Tab {
-        Tab { st, pane: None, status: ClaudeStatus::Exited, status_ts: 0, seen_ts: 0 }
+        Tab { st, pane: None, status: ClaudeStatus::Exited, status_ts: 0, seen_ts: 0, esc_ts: None }
     }
 
     /// Status as shown: "Done" turns into "Idle" once you've looked at the tab.
@@ -42,6 +47,25 @@ impl Tab {
 
     pub fn running(&self) -> bool {
         self.pane.as_ref().is_some_and(|p| p.exited.is_none())
+    }
+
+    fn busy(&self) -> bool {
+        matches!(self.status, ClaudeStatus::Working | ClaudeStatus::Attention)
+    }
+
+    /// True once a pending Esc went unanswered by any hook. A hook after the
+    /// Esc means Claude carried on, so the Esc is dropped.
+    fn take_interrupt(&mut self, now: i64) -> bool {
+        let Some(esc) = self.esc_ts else { return false };
+        if !self.busy() || self.status_ts >= esc {
+            self.esc_ts = None;
+            return false;
+        }
+        if now - esc < INTERRUPT_SETTLE_MS {
+            return false;
+        }
+        self.esc_ts = None;
+        true
     }
 }
 
@@ -436,9 +460,9 @@ impl App {
             }
         };
         let env = vec![
-            ("ISSUEDECK_TAB".to_string(), st.id.clone()),
-            ("ISSUEDECK_ISSUE".to_string(), note.id.clone()),
-            ("ISSUEDECK_NOTE".to_string(), note.path.to_string_lossy().into_owned()),
+            ("OFFICE_TAB".to_string(), st.id.clone()),
+            ("OFFICE_ISSUE".to_string(), note.id.clone()),
+            ("OFFICE_NOTE".to_string(), note.path.to_string_lossy().into_owned()),
         ];
         status::clear_status(&st.id);
         let result = Pane::spawn(&argv, &cwd, &env, rows, cols);
@@ -598,6 +622,9 @@ impl App {
                                 new_sessions.push((issue.clone(), sid, t.st.name.clone()));
                             }
                         }
+                    }
+                    if t.take_interrupt(now) {
+                        status::mark_interrupted(&t.st.id);
                     }
                     if !t.st.custom_name {
                         if let Some(title) = title {
@@ -781,6 +808,9 @@ impl App {
             }
             return;
         };
+        if k.code == KeyCode::Esc && tab.st.kind == TabKind::Claude && tab.busy() {
+            tab.esc_ts = Some(now_ms());
+        }
         match tab.pane.as_mut() {
             Some(p) if p.exited.is_none() => {
                 let bytes = keys::encode(&k, p.application_cursor());
@@ -978,4 +1008,37 @@ pub fn run(app: &mut App, terminal: &mut ratatui::DefaultTerminal) -> Result<()>
     app.state.selected = app.selected.clone();
     app.state.save();
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tab(status: ClaudeStatus, status_ts: i64, esc_ts: Option<i64>) -> Tab {
+        let st = TabState {
+            id: "t".into(),
+            name: "claude".into(),
+            kind: TabKind::Claude,
+            custom_name: false,
+            claude_session: None,
+        };
+        Tab { status, status_ts, esc_ts, ..Tab::new(st) }
+    }
+
+    #[test]
+    fn interrupt_settles_only_without_hooks() {
+        let mut t = tab(ClaudeStatus::Attention, 100, Some(1000));
+        assert!(!t.take_interrupt(1000 + INTERRUPT_SETTLE_MS - 1));
+        assert!(t.take_interrupt(1000 + INTERRUPT_SETTLE_MS));
+        assert_eq!(t.esc_ts, None);
+
+        // A hook after the Esc: Claude carried on.
+        let mut t = tab(ClaudeStatus::Working, 1200, Some(1000));
+        assert!(!t.take_interrupt(9000));
+        assert_eq!(t.esc_ts, None);
+
+        // Already resolved some other way.
+        let mut t = tab(ClaudeStatus::Done, 100, Some(1000));
+        assert!(!t.take_interrupt(9000));
+    }
 }

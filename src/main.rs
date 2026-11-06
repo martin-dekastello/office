@@ -19,7 +19,7 @@ use crossterm::event::{
 use crossterm::execute;
 
 #[derive(Parser)]
-#[command(name = "issuedeck", version, about = "Issues on the left, Claude Code tabs on the right, notes in Obsidian.")]
+#[command(name = "office", version, about = "Issues on the left, Claude Code tabs on the right, notes in Obsidian.")]
 struct Cli {
     #[command(subcommand)]
     cmd: Option<Cmd>,
@@ -29,7 +29,7 @@ struct Cli {
 enum Cmd {
     /// Called by Claude Code hooks (reads the hook JSON on stdin).
     Hook,
-    /// Add issuedeck status hooks to ~/.claude/settings.json (only needed if inject_hooks = false).
+    /// Add office status hooks to ~/.claude/settings.json (only needed if inject_hooks = false).
     InstallHooks,
     /// Create a local issue note.
     New { title: Vec<String> },

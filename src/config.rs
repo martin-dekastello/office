@@ -90,7 +90,7 @@ impl Default for Config {
     }
 }
 
-const TEMPLATE: &str = r#"# issuedeck configuration
+const TEMPLATE: &str = r#"# office configuration
 
 # Obsidian vault root and the folder inside it that holds active/ done/ archive/
 vault = "{VAULT}"
@@ -126,22 +126,22 @@ prefix = "ctrl-a"
 "#;
 
 pub fn config_path() -> PathBuf {
-    if let Ok(p) = std::env::var("ISSUEDECK_CONFIG") {
+    if let Ok(p) = std::env::var("OFFICE_CONFIG") {
         return PathBuf::from(p);
     }
     dirs::config_dir()
         .unwrap_or_else(|| PathBuf::from("."))
-        .join("issuedeck")
+        .join("office")
         .join("config.toml")
 }
 
 pub fn data_dir() -> PathBuf {
-    if let Ok(p) = std::env::var("ISSUEDECK_DATA") {
+    if let Ok(p) = std::env::var("OFFICE_DATA") {
         return PathBuf::from(p);
     }
     dirs::data_local_dir()
         .unwrap_or_else(|| PathBuf::from("."))
-        .join("issuedeck")
+        .join("office")
 }
 
 /// Expand a leading "~" to the home directory.

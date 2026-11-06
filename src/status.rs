@@ -1,7 +1,7 @@
 //! Claude status tracking via Claude Code hooks.
 //!
-//! Each tab is spawned with ISSUEDECK_TAB=<tab id>. Claude Code runs
-//! `issuedeck hook` on lifecycle events; the hook writes
+//! Each tab is spawned with OFFICE_TAB=<tab id>. Claude Code runs
+//! `office hook` on lifecycle events; the hook writes
 //! <data>/status/<tab id>.json, which the UI polls.
 
 use anyhow::{Context, Result};
@@ -94,16 +94,16 @@ pub fn map_event(payload: &Value, prev: Option<ClaudeStatus>) -> Option<ClaudeSt
                 None
             }
         }
-        "Stop" => Some(ClaudeStatus::Done),
+        "Stop" | "StopFailure" => Some(ClaudeStatus::Done),
         "SessionEnd" => Some(ClaudeStatus::Exited),
         _ => None,
     }
 }
 
-/// `issuedeck hook`: called by Claude Code. Never fails loudly, so a global
-/// hook install can't break claude sessions started outside issuedeck.
+/// `office hook`: called by Claude Code. Never fails loudly, so a global
+/// hook install can't break claude sessions started outside office.
 pub fn run_hook() -> Result<()> {
-    let Ok(tab) = std::env::var("ISSUEDECK_TAB") else { return Ok(()) };
+    let Ok(tab) = std::env::var("OFFICE_TAB") else { return Ok(()) };
     let mut input = String::new();
     let _ = std::io::stdin().read_to_string(&mut input);
     let payload: Value = serde_json::from_str(&input).unwrap_or(Value::Null);
@@ -127,13 +127,27 @@ pub fn run_hook() -> Result<()> {
             .to_string(),
         ts: chrono::Utc::now().timestamp_millis(),
     };
+    write_status(&tab, &file)
+}
+
+fn write_status(tab: &str, file: &StatusFile) -> Result<()> {
     let dir = status_dir();
     std::fs::create_dir_all(&dir)?;
-    let path = status_path(&tab);
     let tmp = dir.join(format!("{tab}.{}.tmp", std::process::id()));
-    std::fs::write(&tmp, serde_json::to_vec(&file)?)?;
-    std::fs::rename(&tmp, &path)?;
+    std::fs::write(&tmp, serde_json::to_vec(file)?)?;
+    std::fs::rename(&tmp, status_path(tab))?;
     Ok(())
+}
+
+/// Claude Code fires no hook when Esc interrupts a turn or rejects a
+/// permission prompt, so the UI records the idle state itself.
+pub fn mark_interrupted(tab: &str) {
+    let Some(mut file) = read_status(tab) else { return };
+    file.status = ClaudeStatus::Idle;
+    file.message = None;
+    file.event = "Interrupted".to_string();
+    file.ts = chrono::Utc::now().timestamp_millis();
+    let _ = write_status(tab, &file);
 }
 
 const EVENTS: &[(&str, bool)] = &[
@@ -144,11 +158,12 @@ const EVENTS: &[(&str, bool)] = &[
     ("PermissionRequest", true),
     ("Notification", false),
     ("Stop", false),
+    ("StopFailure", false),
     ("SessionEnd", false),
 ];
 
 fn hook_command() -> Result<String> {
-    let exe = std::env::current_exe().context("locating issuedeck executable")?;
+    let exe = std::env::current_exe().context("locating office executable")?;
     Ok(format!("\"{}\" hook", exe.display()))
 }
 
@@ -180,13 +195,13 @@ fn claude_settings_path() -> PathBuf {
     base.join("settings.json")
 }
 
-/// `issuedeck install-hooks`: merge hooks into ~/.claude/settings.json
+/// `office install-hooks`: merge hooks into ~/.claude/settings.json
 /// (fallback for setups where `--settings` injection is disabled).
 pub fn install_global() -> Result<PathBuf> {
     let path = claude_settings_path();
     let mut root: Value = if path.exists() {
         let text = std::fs::read_to_string(&path)?;
-        std::fs::write(path.with_extension("json.issuedeck-backup"), &text)?;
+        std::fs::write(path.with_extension("json.office-backup"), &text)?;
         serde_json::from_str(&text).with_context(|| format!("parsing {}", path.display()))?
     } else {
         json!({})
@@ -202,7 +217,7 @@ pub fn install_global() -> Result<PathBuf> {
         let already = arr.iter().any(|e| {
             e.get("hooks")
                 .and_then(Value::as_array)
-                .map(|hs| hs.iter().any(|h| h.get("command").and_then(Value::as_str).is_some_and(|c| c.ends_with("issuedeck\" hook") || c == cmd)))
+                .map(|hs| hs.iter().any(|h| h.get("command").and_then(Value::as_str).is_some_and(|c| c.ends_with("office\" hook") || c == cmd)))
                 .unwrap_or(false)
         });
         if !already {
@@ -225,6 +240,7 @@ mod tests {
         let s = |v: Value| map_event(&v, None);
         assert_eq!(s(json!({"hook_event_name":"UserPromptSubmit"})), Some(ClaudeStatus::Working));
         assert_eq!(s(json!({"hook_event_name":"Stop"})), Some(ClaudeStatus::Done));
+        assert_eq!(s(json!({"hook_event_name":"StopFailure"})), Some(ClaudeStatus::Done));
         assert_eq!(
             s(json!({"hook_event_name":"Notification","message":"Claude needs your permission to use Bash"})),
             Some(ClaudeStatus::Attention)

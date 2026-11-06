@@ -1,9 +1,9 @@
-# issuedeck
+# office
 
 Issues on the left, Claude Code tabs on the right, one Obsidian note per issue.
 
 ```
- issuedeck  ● 1                  │ ✳ 1:Refactor tile cache   ● 2:Fix loader   $ 3:shell
+ office  ● 1                     │ ✳ 1:Refactor tile cache   ● 2:Fix loader   $ 3:shell
   Active 3  Done 1  Archive 0    │
                                  │  (live Claude Code session for the selected issue)
  ✳ TS-42                      3▤ │
@@ -35,8 +35,8 @@ Issues on the left, Claude Code tabs on the right, one Obsidian note per issue.
 
 ```sh
 cargo install --path .
-issuedeck            # first run writes the config and prints its path
-issuedeck paths      # where config, data, notes and worktrees live
+office               # first run writes the config and prints its path
+office paths         # where config, data, notes and worktrees live
 ```
 
 Requirements: `claude` on PATH, `git` for worktrees, `gh` (logged in) for GitHub sources,
@@ -44,8 +44,8 @@ Requirements: `claude` on PATH, `git` for worktrees, `gh` (logged in) for GitHub
 
 ## Config
 
-`~/.config/issuedeck/config.toml` on Linux, `~/Library/Application Support/issuedeck/config.toml`
-on macOS, `%APPDATA%\issuedeck\config.toml` on Windows. Override with `$ISSUEDECK_CONFIG`.
+`~/.config/office/config.toml` on Linux, `~/Library/Application Support/office/config.toml`
+on macOS, `%APPDATA%\office\config.toml` on Windows. Override with `$OFFICE_CONFIG`.
 
 ```toml
 vault = "~/Documents/Obsidian"
@@ -101,26 +101,26 @@ to select text.
 
 ## How the Claude status works
 
-Each tab is started with `ISSUEDECK_TAB=<uuid>`. Claude tabs are launched as
-`claude --settings <data>/claude-hooks.json`. That file registers `issuedeck hook` for
+Each tab is started with `OFFICE_TAB=<uuid>`. Claude tabs are launched as
+`claude --settings <data>/claude-hooks.json`. That file registers `office hook` for
 `SessionStart`, `UserPromptSubmit`, `Pre/PostToolUse`, `PermissionRequest`,
 `Notification`, `Stop` and `SessionEnd`. The hook writes `<data>/status/<uuid>.json`
-and the UI polls it. The hook does nothing when `ISSUEDECK_TAB` isn't set, so it's safe to
+and the UI polls it. The hook does nothing when `OFFICE_TAB` isn't set, so it's safe to
 install globally. If you'd rather not use `--settings`, set `inject_hooks = false` and run
-`issuedeck install-hooks`. That merges the hooks into `~/.claude/settings.json` and writes
+`office install-hooks`. That merges the hooks into `~/.claude/settings.json` and writes
 a backup first.
 
-Every tab also gets `ISSUEDECK_ISSUE` and `ISSUEDECK_NOTE` (the note's path). You can tell
-Claude "append a summary to $ISSUEDECK_NOTE".
+Every tab also gets `OFFICE_ISSUE` and `OFFICE_NOTE` (the note's path). You can tell
+Claude "append a summary to $OFFICE_NOTE".
 
 ## CLI
 
 ```
-issuedeck                 # TUI
-issuedeck new <title>     # create a local issue note
-issuedeck sync            # pull GitHub/Jira issues and create missing notes
-issuedeck list
-issuedeck install-hooks
+office                 # TUI
+office new <title>     # create a local issue note
+office sync            # pull GitHub/Jira issues and create missing notes
+office list
+office install-hooks
 ```
 
 ## Layout
@@ -142,5 +142,9 @@ src/
 
 - Sessions stop when you quit; Claude tabs resume from their session ID, shells don't. A
   background daemon would keep them running across UI restarts (like tmux detach).
-- There's no mouse passthrough to apps inside a tab (the wheel scrolls issuedeck's scrollback).
+- There's no mouse passthrough to apps inside a tab (the wheel scrolls office's scrollback).
+- Claude Code fires no hook for some state changes. Esc (interrupt or rejected permission) is
+  inferred: a busy tab goes idle if no hook follows within 1.5s. After you approve a permission
+  prompt the tab stays amber until that tool finishes. A new worktree's trust dialog shows as
+  starting (`◌`), not as needing you.
 - Done/archived issues keep their worktree. Remove it with `git worktree remove` when you're done.

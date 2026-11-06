@@ -367,7 +367,7 @@ mod tests {
 
     #[test]
     fn create_move() {
-        let dir = std::env::temp_dir().join(format!("issuedeck-test-{}", uuid::Uuid::new_v4()));
+        let dir = std::env::temp_dir().join(format!("office-test-{}", uuid::Uuid::new_v4()));
         let v = Vault::new(dir.clone()).unwrap();
         let (n, created) = v
             .create(NewNote { id: "GH-7", title: "Mapa dlaždic", source: "github", url: Some("https://x"), repo: Some("o/r") })
