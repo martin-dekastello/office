@@ -1,7 +1,9 @@
 //! An embedded terminal: a child process on a PTY (ConPTY on Windows)
 //! parsed by vt100 and rendered with tui-term.
 
+use crate::keys;
 use anyhow::{Context, Result};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent};
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
 use std::io::{Read, Write};
 use std::path::Path;
@@ -191,9 +193,47 @@ impl Pane {
         self.parser.lock().unwrap().screen().bracketed_paste()
     }
 
+    /// Report a mouse event (in pane coordinates) to the child. False if it
+    /// didn't ask for this event.
+    pub fn send_mouse(&mut self, m: &MouseEvent) -> bool {
+        let bytes = {
+            let p = self.parser.lock().unwrap();
+            let s = p.screen();
+            keys::encode_mouse(m, s.mouse_protocol_mode(), s.mouse_protocol_encoding())
+        };
+        match bytes {
+            Some(b) => {
+                self.write(&b);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Scroll a page. Apps that draw their own screen get the key, so they
+    /// choose how far to go; everything else moves our scrollback by `lines`.
+    pub fn scroll_page(&mut self, up: bool, lines: isize) {
+        let child_scrolls = {
+            let p = self.parser.lock().unwrap();
+            let s = p.screen();
+            s.alternate_screen() || s.mouse_protocol_mode() != vt100::MouseProtocolMode::None
+        };
+        if child_scrolls {
+            let code = if up { KeyCode::PageUp } else { KeyCode::PageDown };
+            self.write(&keys::encode(&KeyEvent::new(code, KeyModifiers::NONE), false));
+        } else {
+            self.scroll_by(if up { lines } else { -lines });
+        }
+    }
+
     pub fn scroll_by(&mut self, delta: isize) {
         let mut p = self.parser.lock().unwrap();
         if p.screen().alternate_screen() {
+            // No scrollback here, so send arrows like xterm's alternate scroll.
+            let code = if delta > 0 { KeyCode::Up } else { KeyCode::Down };
+            let key = keys::encode(&KeyEvent::new(code, KeyModifiers::NONE), p.screen().application_cursor());
+            drop(p);
+            self.write(&key.repeat(delta.unsigned_abs()));
             return;
         }
         let want = (self.scroll as isize + delta).max(0) as usize;
@@ -213,5 +253,81 @@ impl Drop for Pane {
         if self.exited.is_none() {
             let _ = self.child.kill();
         }
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use crossterm::event::MouseEventKind;
+    use std::time::{Duration, Instant};
+
+    fn wait_until(mut done: impl FnMut() -> bool) {
+        let start = Instant::now();
+        while !done() {
+            assert!(start.elapsed() < Duration::from_secs(10), "timed out");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    /// A child that prints `setup`, then records everything it receives.
+    struct Recorder {
+        pane: Pane,
+        log: std::path::PathBuf,
+    }
+
+    impl Recorder {
+        fn start(setup: &str) -> Recorder {
+            let log = std::env::temp_dir().join(format!("office-test-{}", uuid::Uuid::new_v4()));
+            let script = format!("stty raw -echo; printf '{setup}'; echo ready; exec cat > '{}'", log.display());
+            let argv = ["sh".to_string(), "-c".to_string(), script];
+            let pane = Pane::spawn(&argv, &std::env::temp_dir(), &[], 5, 40).unwrap();
+            wait_until(|| pane.parser.lock().unwrap().screen().contents().contains("ready"));
+            wait_until(|| log.exists());
+            Recorder { pane, log }
+        }
+
+        fn expect(&self, want: &[u8]) {
+            wait_until(|| std::fs::read(&self.log).is_ok_and(|got| got == want));
+        }
+    }
+
+    impl Drop for Recorder {
+        fn drop(&mut self) {
+            std::fs::remove_file(&self.log).ok();
+        }
+    }
+
+    fn wheel() -> MouseEvent {
+        MouseEvent { kind: MouseEventKind::ScrollUp, column: 2, row: 3, modifiers: KeyModifiers::NONE }
+    }
+
+    #[test]
+    fn mouse_reaches_a_child_that_asked_for_it() {
+        let mut r = Recorder::start("\\033[?1049h\\033[?1000h\\033[?1006h");
+        assert!(r.pane.send_mouse(&wheel()));
+        r.expect(b"\x1b[<64;3;4M");
+    }
+
+    #[test]
+    fn alternate_screen_without_mouse_gets_keys() {
+        let mut r = Recorder::start("\\033[?1049h");
+        assert!(!r.pane.send_mouse(&wheel()));
+        r.pane.scroll_by(2);
+        r.pane.scroll_by(-1);
+        r.pane.scroll_page(true, 10);
+        r.expect(b"\x1b[A\x1b[A\x1b[B\x1b[5~");
+    }
+
+    #[test]
+    fn main_screen_uses_local_scrollback() {
+        let mut r = Recorder::start("1\\r\\n2\\r\\n3\\r\\n4\\r\\n5\\r\\n6\\r\\n7\\r\\n8\\r\\n");
+        assert!(!r.pane.send_mouse(&wheel()));
+        r.pane.scroll_by(2);
+        assert_eq!(r.pane.scroll, 2);
+        r.pane.scroll_page(true, 1);
+        assert_eq!(r.pane.scroll, 3);
+        r.pane.scroll_page(false, 3);
+        assert_eq!(r.pane.scroll, 0);
     }
 }
