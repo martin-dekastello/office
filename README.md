@@ -25,8 +25,11 @@ Issues on the left, Claude Code tabs on the right, one Obsidian note per issue.
   Each new Claude session is logged under `## Sessions` with its `claude --resume <id>` command.
 - **One git worktree + branch per issue** (`<worktrees_dir>/<repo>/<id>-<slug>`), so all
   tabs of an issue share one checkout.
-- **Sessions survive restarts**: tabs are saved, and a Claude tab is restarted with
-  `claude --resume <session>` the next time you open it.
+- **Sessions can be stopped and picked up again.** Press `z` to suspend an inactive Claude
+  tab: its process stops and its RAM is freed, but you can still scroll its saved screen,
+  and `⏎` continues it with `claude --resume <session>`. A Claude tab that exits or was
+  running when you quit office ends up the same way. Closing one with `x` keeps it too:
+  `R` reopens it.
 - **GitHub (via `gh`) + Jira Cloud + local issues**, behind one `Provider` trait.
 - **Cross-platform**: macOS, Linux, Windows (ConPTY). It's a single binary with its own
   terminal emulation, so it doesn't need tmux.
@@ -82,6 +85,7 @@ to the terminal.
 | `⏎` | open issue: start or resume its active tab |
 | `1` `2` `3` / `h` | view Active / Done / Archive |
 | `c` `t` `e` | new Claude / shell / note-editor tab |
+| `z` / `R` | suspend Claude tab / reopen closed Claude tab |
 | `C` | new Claude tab in a directory you type (empty = issue default) |
 | `o` / `w` | open note in Obsidian / issue in browser |
 | `d` `a` `u` | move to done / archive / active |
@@ -94,10 +98,14 @@ to the terminal.
 | `s` / `Tab` | toggle focus between sidebar and terminal |
 | `1`–`9`, `h`/`l` | go to tab, previous/next tab |
 | `j` / `k` | next/previous issue |
-| `c` `C` `t` `e` `o` `d` `a` `n` `S` | same as in the sidebar |
+| `c` `C` `t` `e` `z` `R` `o` `d` `a` `n` `S` | same as in the sidebar |
 | `x`, `,` | close tab, rename tab |
 | `[` `]` | scroll the tab back/forward (the mouse wheel works too) |
 | `?`, `q` | help, quit |
+
+On a suspended tab, `⏎` resumes, and the wheel, `↑` `↓` `PgUp` `PgDn` `g` `G` and
+`prefix [ ]` scroll. Moving to a suspended tab never starts it. `R` keeps the last 10 closed
+Claude tabs per issue.
 
 The mouse is captured so you can click issues and tabs, a tab's `×` to close it, and `quit`
 at the top of the sidebar. Both ask first. Inside a tab, the wheel, clicks and
@@ -141,7 +149,8 @@ src/
   providers.rs  GitHub (gh), Jira REST v3
   status.rs     Claude Code hook handler and settings
   worktree.rs   per-issue git worktrees
-  state.rs      persisted tabs and session IDs
+  state.rs      persisted tabs, session IDs and saved screens
+  transcript.rs conversation text from Claude's transcript, for saved screens
 ```
 
 ## Known limits / next steps
@@ -150,6 +159,11 @@ src/
   background daemon would keep them running across UI restarts (like tmux detach).
 - OSC 52 isn't passed on, so text selected by dragging inside fullscreen Claude Code doesn't
   reach the clipboard. Select with Shift (Option in iTerm) instead.
+- Saved screens are plain files in `<data>/snapshots`, deleted on resume or when the tab is
+  dropped. A pane narrower than the saved width clips lines instead of rewrapping them.
+- Claude's fullscreen mode (`"tui": "fullscreen"`) leaves no scrollback, so a suspended tab
+  shows the conversation from its transcript above the last screen: messages and tool calls,
+  not tool output. This needs the hooks.
 - Claude Code fires no hook for some state changes. Esc (interrupt or rejected permission) is
   inferred: a busy tab goes idle if no hook follows within 1.5s. After you approve a permission
   prompt the tab stays amber until that tool finishes. A new worktree's trust dialog shows as

@@ -45,6 +45,9 @@ impl ClaudeStatus {
 pub struct StatusFile {
     pub status: ClaudeStatus,
     pub session_id: Option<String>,
+    /// Only exists on disk once the session has messages.
+    #[serde(default)]
+    pub transcript: Option<String>,
     pub message: Option<String>,
     pub event: String,
     /// Unix millis.
@@ -107,27 +110,24 @@ pub fn run_hook() -> Result<()> {
     let mut input = String::new();
     let _ = std::io::stdin().read_to_string(&mut input);
     let payload: Value = serde_json::from_str(&input).unwrap_or(Value::Null);
-    let prev = read_status(&tab);
-    let Some(status) = map_event(&payload, prev.as_ref().map(|p| p.status)) else {
+    let Some(file) = next_status(&payload, read_status(&tab)) else {
         return Ok(());
     };
-    let session_id = payload
-        .get("session_id")
-        .and_then(Value::as_str)
-        .map(String::from)
-        .or_else(|| prev.as_ref().and_then(|p| p.session_id.clone()));
-    let file = StatusFile {
-        status,
-        session_id,
-        message: payload.get("message").and_then(Value::as_str).map(String::from),
-        event: payload
-            .get("hook_event_name")
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .to_string(),
-        ts: chrono::Utc::now().timestamp_millis(),
-    };
     write_status(&tab, &file)
+}
+
+/// The status file after a hook event. `None` = leave it unchanged.
+fn next_status(payload: &Value, prev: Option<StatusFile>) -> Option<StatusFile> {
+    let status = map_event(payload, prev.as_ref().map(|p| p.status))?;
+    let text = |key: &str| payload.get(key).and_then(Value::as_str).map(String::from);
+    Some(StatusFile {
+        status,
+        session_id: text("session_id").or_else(|| prev.as_ref().and_then(|p| p.session_id.clone())),
+        transcript: text("transcript_path").or_else(|| prev.as_ref().and_then(|p| p.transcript.clone())),
+        message: text("message"),
+        event: text("hook_event_name").unwrap_or_default(),
+        ts: chrono::Utc::now().timestamp_millis(),
+    })
 }
 
 fn write_status(tab: &str, file: &StatusFile) -> Result<()> {
@@ -250,5 +250,21 @@ mod tests {
             None
         );
         assert_eq!(s(json!({"hook_event_name":"SubagentStop"})), None);
+    }
+
+    #[test]
+    fn session_and_transcript_carry_over() {
+        let start = json!({"hook_event_name":"SessionStart","session_id":"s","transcript_path":"/t.jsonl"});
+        let first = next_status(&start, None).unwrap();
+        let next = next_status(&json!({"hook_event_name":"Stop"}), Some(first)).unwrap();
+        assert_eq!(next.session_id.as_deref(), Some("s"));
+        assert_eq!(next.transcript.as_deref(), Some("/t.jsonl"));
+    }
+
+    #[test]
+    fn status_files_from_older_versions_still_parse() {
+        let old = r#"{"status":"idle","session_id":"s","message":null,"event":"Stop","ts":1}"#;
+        let f: StatusFile = serde_json::from_str(old).unwrap();
+        assert_eq!(f.transcript, None);
     }
 }

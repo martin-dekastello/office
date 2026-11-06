@@ -49,6 +49,85 @@ impl vt100::Callbacks for Callbacks {
 
 pub type Parser = vt100::Parser<Callbacks>;
 
+const SCROLLBACK: usize = 5000;
+/// How far up from the bottom of an exited pane to look for Claude's resume hint.
+const RESUME_HINT_LINES: usize = 6;
+
+fn scroll_parser(p: &mut Parser, from: usize, delta: isize) -> usize {
+    let want = (from as isize + delta).max(0) as usize;
+    p.screen_mut().set_scrollback(want);
+    // vt100 clamps to the available history.
+    p.screen().scrollback()
+}
+
+/// Scrollback and screen as bytes for `Snapshot`: the width, `history`, then
+/// one row per line. `history` is left for the replay to wrap.
+fn encode(p: &mut Parser, history: &[u8]) -> Vec<u8> {
+    let screen = p.screen_mut();
+    let keep = screen.scrollback();
+    let (rows, cols) = screen.size();
+    let mut out = format!("{cols}\n").into_bytes();
+    out.extend_from_slice(history);
+    let mut push = |screen: &vt100::Screen, n: usize| {
+        // A width past the edge turns off wrap tracking, which would emit
+        // absolute cursor moves that only fit the original screen.
+        for row in screen.rows_formatted(0, cols + 1).take(n) {
+            out.extend_from_slice(&row);
+            out.extend_from_slice(b"\x1b[m\r\n");
+        }
+    };
+    screen.set_scrollback(usize::MAX);
+    let mut left = screen.scrollback();
+    while left > 0 {
+        screen.set_scrollback(left);
+        let n = left.min(rows as usize);
+        push(screen, n);
+        left -= n;
+    }
+    screen.set_scrollback(0);
+    push(screen, rows as usize);
+    screen.set_scrollback(keep);
+    // A final newline would scroll the top row away on replay.
+    out.truncate(out.len() - 2);
+    out
+}
+
+/// The session id from Claude's exit hint, if it's at the end of the text.
+/// Only the end counts: a session can print resume commands in its own output.
+fn parse_resume_id(text: &str) -> Option<String> {
+    text.trim_end().lines().rev().take(RESUME_HINT_LINES).find_map(|l| {
+        let id = l.split("claude --resume ").nth(1)?.split_whitespace().next()?;
+        uuid::Uuid::parse_str(id).ok().map(|_| id.to_string())
+    })
+}
+
+/// The saved screen of a stopped pane, read-only.
+pub struct Snapshot {
+    pub parser: Parser,
+    pub scroll: usize,
+    pub rows: u16,
+}
+
+impl Snapshot {
+    /// Rebuild at the saved width, so lines keep their shape in any pane.
+    fn decode(bytes: &[u8], rows: u16) -> Option<Snapshot> {
+        let nl = bytes.iter().position(|b| *b == b'\n')?;
+        let cols: u16 = std::str::from_utf8(&bytes[..nl]).ok()?.parse().ok()?;
+        let mut parser =
+            vt100::Parser::new_with_callbacks(rows.max(2), cols, SCROLLBACK, Callbacks::default());
+        parser.process(&bytes[nl + 1..]);
+        Some(Snapshot { parser, scroll: 0, rows })
+    }
+
+    pub fn load(path: &Path, rows: u16) -> Option<Snapshot> {
+        Snapshot::decode(&std::fs::read(path).ok()?, rows)
+    }
+
+    pub fn scroll_by(&mut self, delta: isize) {
+        self.scroll = scroll_parser(&mut self.parser, self.scroll, delta);
+    }
+}
+
 pub struct Pane {
     pub parser: Arc<Mutex<Parser>>,
     writer: Arc<Mutex<Box<dyn Write + Send>>>,
@@ -94,7 +173,7 @@ impl Pane {
         let parser = Arc::new(Mutex::new(vt100::Parser::new_with_callbacks(
             rows,
             cols,
-            5000,
+            SCROLLBACK,
             Callbacks::default(),
         )));
         let dirty = Arc::new(AtomicBool::new(true));
@@ -236,11 +315,32 @@ impl Pane {
             self.write(&key.repeat(delta.unsigned_abs()));
             return;
         }
-        let want = (self.scroll as isize + delta).max(0) as usize;
-        p.screen_mut().set_scrollback(want);
-        // vt100 clamps to the available history.
-        self.scroll = p.screen().scrollback();
+        self.scroll = scroll_parser(&mut p, self.scroll, delta);
         self.dirty.store(true, Ordering::Relaxed);
+    }
+
+    pub fn snapshot(&self, history: &[u8]) -> Vec<u8> {
+        encode(&mut self.parser.lock().unwrap(), history)
+    }
+
+    /// False on the alternate screen, or if nothing has scrolled off yet.
+    pub fn has_scrollback(&self) -> bool {
+        let mut p = self.parser.lock().unwrap();
+        let keep = p.screen().scrollback();
+        p.screen_mut().set_scrollback(usize::MAX);
+        let any = p.screen().scrollback() > 0;
+        p.screen_mut().set_scrollback(keep);
+        any
+    }
+
+    /// The session id Claude printed on exit.
+    pub fn resume_id(&self) -> Option<String> {
+        let mut p = self.parser.lock().unwrap();
+        let keep = p.screen().scrollback();
+        p.screen_mut().set_scrollback(0);
+        let text = p.screen().contents();
+        p.screen_mut().set_scrollback(keep);
+        parse_resume_id(&text)
     }
 
     pub fn kill(&mut self) {
@@ -252,6 +352,8 @@ impl Drop for Pane {
     fn drop(&mut self) {
         if self.exited.is_none() {
             let _ = self.child.kill();
+            // Reap it, or it stays a zombie until office quits.
+            let _ = self.child.wait();
         }
     }
 }
@@ -329,5 +431,95 @@ mod tests {
         assert_eq!(r.pane.scroll, 3);
         r.pane.scroll_page(false, 3);
         assert_eq!(r.pane.scroll, 0);
+    }
+}
+
+#[cfg(test)]
+mod snapshot_tests {
+    use super::*;
+
+    fn parser(rows: u16, cols: u16) -> Parser {
+        vt100::Parser::new_with_callbacks(rows, cols, SCROLLBACK, Callbacks::default())
+    }
+
+    fn numbered(p: &mut Parser, n: usize) {
+        for i in 0..n {
+            p.process(format!("line {i}\r\n").as_bytes());
+        }
+    }
+
+    #[test]
+    fn snapshot_keeps_history_past_one_page() {
+        let mut p = parser(5, 40);
+        numbered(&mut p, 23);
+        p.screen_mut().set_scrollback(2);
+        let bytes = encode(&mut p, b"");
+        assert_eq!(p.screen().scrollback(), 2);
+
+        let mut s = Snapshot::decode(&bytes, 5).unwrap();
+        assert!(s.parser.screen().contents().contains("line 22"));
+        s.scroll_by(10_000);
+        assert_eq!(s.scroll, 19);
+        assert!(s.parser.screen().contents().starts_with("line 0\n"));
+        s.scroll_by(-10_000);
+        assert_eq!(s.scroll, 0);
+    }
+
+    #[test]
+    fn snapshot_keeps_the_bottom_at_any_height() {
+        let mut p = parser(10, 40);
+        numbered(&mut p, 30);
+        let bytes = encode(&mut p, b"");
+        for rows in [4, 10, 25] {
+            let s = Snapshot::decode(&bytes, rows).unwrap();
+            assert!(s.parser.screen().contents().contains("line 29"), "{rows} rows");
+        }
+    }
+
+    #[test]
+    fn snapshot_keeps_colours_and_wrapped_lines() {
+        let mut p = parser(5, 10);
+        p.process(b"\x1b[31mred\x1b[m plain\r\n");
+        p.process(b"0123456789abcdef\r\n");
+        p.process("\x1b[2C\x1b[42m \x1b[m日本\r\n".as_bytes());
+        let s = Snapshot::decode(&encode(&mut p, b""), 5).unwrap();
+        let screen = s.parser.screen();
+        assert_eq!(screen.cell(0, 0).unwrap().fgcolor(), vt100::Color::Idx(1));
+        assert_eq!(screen.cell(0, 4).unwrap().fgcolor(), vt100::Color::Default);
+        let got: Vec<String> = screen.rows(0, 10).collect();
+        assert_eq!(got[0], "red plain");
+        assert_eq!(got[1], "0123456789");
+        assert_eq!(got[2], "abcdef");
+        assert_eq!(screen.cell(3, 2).unwrap().bgcolor(), vt100::Color::Idx(2));
+        assert_eq!(screen.cell(3, 3).unwrap().contents(), "日");
+    }
+
+    #[test]
+    fn history_scrolls_above_an_alternate_screen() {
+        let mut p = parser(4, 10);
+        p.process(b"\x1b[?1049hscreen");
+
+        let mut s = Snapshot::decode(&encode(&mut p, b"0123456789abc\r\nold\r\n"), 4).unwrap();
+        assert!(s.parser.screen().contents().starts_with("screen"));
+        s.scroll_by(10_000);
+        let got: Vec<String> = s.parser.screen().rows(0, 10).collect();
+        assert_eq!(got[..3], ["0123456789", "abc", "old"]);
+    }
+
+    #[test]
+    fn decode_rejects_garbage() {
+        assert!(Snapshot::decode(b"", 5).is_none());
+        assert!(Snapshot::decode(b"not a width\nrow", 5).is_none());
+    }
+
+    #[test]
+    fn resume_id_comes_only_from_the_end() {
+        let id = "f482d56d-0174-4d64-ba0c-10a88424b79e";
+        let hint = format!("Resume this session with:\nclaude --resume {id}\n\n\n");
+        assert_eq!(parse_resume_id(&hint).as_deref(), Some(id));
+
+        let old = format!("{hint}{}", "output\n".repeat(RESUME_HINT_LINES + 1));
+        assert_eq!(parse_resume_id(&old), None);
+        assert_eq!(parse_resume_id("claude --resume <session>\n"), None);
     }
 }

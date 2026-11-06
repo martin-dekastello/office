@@ -34,6 +34,9 @@ pub struct IssueState {
     pub tabs: Vec<TabState>,
     #[serde(default)]
     pub active_tab: usize,
+    /// Closed Claude tabs that can be reopened, oldest first.
+    #[serde(default)]
+    pub closed: Vec<TabState>,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -44,6 +47,25 @@ pub struct State {
 
 fn path() -> PathBuf {
     crate::config::data_dir().join("state.json")
+}
+
+pub fn snapshot_path(tab: &str) -> PathBuf {
+    crate::config::data_dir().join("snapshots").join(format!("{tab}.ansi"))
+}
+
+pub fn write_snapshot(tab: &str, bytes: &[u8]) {
+    let p = snapshot_path(tab);
+    if let Some(d) = p.parent() {
+        let _ = std::fs::create_dir_all(d);
+    }
+    let tmp = p.with_extension("ansi.tmp");
+    if std::fs::write(&tmp, bytes).is_ok() {
+        let _ = std::fs::rename(&tmp, &p);
+    }
+}
+
+pub fn remove_snapshot(tab: &str) {
+    let _ = std::fs::remove_file(snapshot_path(tab));
 }
 
 impl State {
@@ -65,5 +87,16 @@ impl State {
                 let _ = std::fs::rename(&tmp, &p);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn state_without_closed_tabs_still_loads() {
+        let st: IssueState = serde_json::from_str(r#"{"worktree":null,"tabs":[]}"#).unwrap();
+        assert!(st.closed.is_empty());
     }
 }

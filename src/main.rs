@@ -6,6 +6,7 @@ mod providers;
 mod state;
 mod status;
 mod term;
+mod transcript;
 mod ui;
 mod vault;
 mod worktree;
