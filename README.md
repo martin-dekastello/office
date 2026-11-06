@@ -71,8 +71,10 @@ path = "~/code/backend"
 ```
 
 To point one issue at a different repo, add `repo_path: ~/code/other` to that note's
-frontmatter in Obsidian. To run a single Claude session somewhere else, press `C`. The tab
-keeps that directory when it restarts or resumes, and no worktree is created for it.
+frontmatter in Obsidian. To run a single Claude session somewhere else, press `C`. `Tab`
+completes the path as in zsh: it fills in what it can, lists the matches, then cycles through
+them (`Shift-Tab` goes back, `/` enters the selected folder). The tab keeps that directory
+when it restarts or resumes, and no worktree is created for it.
 
 ## Keys
 
@@ -86,7 +88,7 @@ to the terminal.
 | `1` `2` `3` / `h` | view Active / Done / Archive |
 | `c` `t` `e` | new Claude / shell / note-editor tab |
 | `z` / `R` | suspend Claude tab / reopen closed Claude tab |
-| `C` | new Claude tab in a directory you type (empty = issue default) |
+| `C` | new Claude tab in a directory you type (`Tab` completes, empty = issue default) |
 | `o` / `w` | open note in Obsidian / issue in browser |
 | `d` `a` `u` | move to done / archive / active |
 | `n` | new local issue |

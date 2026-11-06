@@ -1,4 +1,5 @@
 use crate::app::{App, ConfirmKind, Focus, Mode, PromptKind, Tab};
+use crate::complete::Completion;
 use crate::state::TabKind;
 use crate::status::ClaudeStatus;
 use crate::term::Snapshot;
@@ -11,6 +12,7 @@ use ratatui::Frame;
 use tui_term::widget::{Cursor, PseudoTerminal};
 
 const SIDEBAR_W: u16 = 34;
+const MAX_MATCHES: usize = 8;
 const SPIN: [&str; 6] = ["·", "✢", "✳", "✶", "✻", "✽"];
 
 const BG_SIDE: Color = Color::Rgb(22, 22, 26);
@@ -77,9 +79,9 @@ pub fn draw(app: &mut App, f: &mut Frame) {
             let title = match kind {
                 PromptKind::NewIssue => " New local issue — title ",
                 PromptKind::RenameTab => " Rename tab (empty = auto) ",
-                PromptKind::ClaudeDir => " New Claude tab — directory (empty = issue default) ",
+                PromptKind::ClaudeDir => " New Claude tab — directory (Tab completes, empty = issue default) ",
             };
-            draw_prompt(f, area, title, &buf);
+            draw_prompt(f, area, title, &buf, app.completion.as_ref());
         }
         Mode::Confirm(kind) => {
             let q = match kind {
@@ -87,7 +89,7 @@ pub fn draw(app: &mut App, f: &mut Frame) {
                 ConfirmKind::CloseTab => "Close this tab and stop its process? (R reopens Claude tabs) [y/N]",
                 ConfirmKind::Suspend => "Claude isn't idle, so this interrupts it. Suspend anyway? [y/N]",
             };
-            draw_prompt(f, area, " Confirm ", q);
+            draw_prompt(f, area, " Confirm ", q, None);
         }
         _ => {}
     }
@@ -406,11 +408,36 @@ fn centered(area: Rect, w: u16, h: u16) -> Rect {
     Rect { x: area.x + (area.width - w) / 2, y: area.y + (area.height - h) / 2, width: w, height: h }
 }
 
-fn draw_prompt(f: &mut Frame, area: Rect, title: &str, body: &str) {
-    let r = centered(area, 70, 3);
+/// The end of `s` if it's over `max` chars, so the text being typed stays visible.
+fn tail(s: &str, max: usize) -> String {
+    let len = s.chars().count();
+    if len <= max {
+        return s.to_string();
+    }
+    let kept: String = s.chars().skip(len + 1 - max).collect();
+    format!("…{kept}")
+}
+
+fn draw_prompt(f: &mut Frame, area: Rect, title: &str, body: &str, matches: Option<&Completion>) {
+    let rows = matches.map_or(0, |m| m.names.len().min(MAX_MATCHES));
+    let r = centered(area, 70, 3 + rows as u16);
+    let width = r.width.saturating_sub(2) as usize;
     f.render_widget(Clear, r);
-    let b = Block::bordered().border_type(BorderType::Rounded).title(title).border_style(Style::new().fg(ACCENT));
-    f.render_widget(Paragraph::new(format!("{body}▏")).block(b).style(Style::new().fg(FG).bg(BG_SIDE)), r);
+    let mut b = Block::bordered().border_type(BorderType::Rounded).title(title).border_style(Style::new().fg(ACCENT));
+    let mut lines = vec![Line::raw(tail(&format!("{body}▏"), width))];
+    if let Some(m) = matches {
+        let start = m.selected.map_or(0, |s| (s + 1).saturating_sub(rows));
+        for (i, name) in m.names.iter().enumerate().skip(start).take(rows) {
+            let name = truncate(name, width);
+            let style = if m.selected == Some(i) { Style::new().bg(BG_SEL) } else { Style::new().fg(FG_DIM) };
+            lines.push(Line::styled(format!("{name:<width$}"), style));
+        }
+        if m.names.len() > rows {
+            let at = m.selected.map_or(0, |s| s + 1);
+            b = b.title_bottom(Line::raw(format!(" {at}/{} ", m.names.len())).right_aligned());
+        }
+    }
+    f.render_widget(Paragraph::new(lines).block(b).style(Style::new().fg(FG).bg(BG_SIDE)), r);
 }
 
 fn draw_help(app: &App, f: &mut Frame, area: Rect) {
@@ -426,7 +453,7 @@ fn draw_help(app: &App, f: &mut Frame, area: Rect) {
         (format!("Anywhere: {p} then…"), ""),
         ("s / Tab".into(), "toggle sidebar ↔ terminal focus"),
         ("c / t / e".into(), "new Claude / shell / note-editor tab"),
-        ("C".into(), "new Claude tab in a chosen directory"),
+        ("C".into(), "new Claude tab in a chosen directory (Tab completes)"),
         ("1-9, h/l".into(), "go to tab, prev/next tab"),
         ("j / k".into(), "next/prev issue"),
         ("x  ,".into(), "close tab, rename tab"),

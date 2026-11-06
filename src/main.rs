@@ -1,5 +1,6 @@
 #![allow(clippy::collapsible_if)]
 mod app;
+mod complete;
 mod config;
 mod keys;
 mod providers;
