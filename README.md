@@ -95,11 +95,13 @@ to the terminal.
 | `j` / `k` | next/previous issue |
 | `c` `C` `t` `e` `o` `d` `a` `n` `S` | same as in the sidebar |
 | `x`, `,` | close tab, rename tab |
-| `[` `]` | scroll back/forward (the mouse wheel works too) |
+| `[` `]` | scroll the tab back/forward (the mouse wheel works too) |
 | `?`, `q` | help, quit |
 
-The mouse is captured so you can click issues and tabs. Hold Shift (Option in iTerm)
-to select text.
+The mouse is captured so you can click issues and tabs. Inside a tab, the wheel, clicks and
+drags go to the app when it handles the mouse itself, as Claude Code does with
+`"tui": "fullscreen"`. Apps on the alternate screen that don't (`less`) get arrow keys from
+the wheel. Anything else scrolls office's scrollback. Hold Shift (Option in iTerm) to select text.
 
 ## How the Claude status works
 
@@ -144,7 +146,8 @@ src/
 
 - Sessions stop when you quit; Claude tabs resume from their session ID, shells don't. A
   background daemon would keep them running across UI restarts (like tmux detach).
-- There's no mouse passthrough to apps inside a tab (the wheel scrolls office's scrollback).
+- OSC 52 isn't passed on, so text selected by dragging inside fullscreen Claude Code doesn't
+  reach the clipboard. Select with Shift (Option in iTerm) instead.
 - Claude Code fires no hook for some state changes. Esc (interrupt or rejected permission) is
   inferred: a busy tab goes idle if no hook follows within 1.5s. After you approve a permission
   prompt the tab stays amber until that tool finishes. A new worktree's trust dialog shows as

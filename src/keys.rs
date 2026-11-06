@@ -1,6 +1,7 @@
-//! Encode crossterm key events as the bytes a terminal would send.
+//! Encode crossterm key and mouse events as the bytes a terminal would send.
 
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+use vt100::{MouseProtocolEncoding, MouseProtocolMode};
 
 /// Parse "ctrl-a" / "C-b" / "ctrl-space" into a key event matcher.
 pub fn parse_prefix(s: &str) -> (KeyCode, KeyModifiers) {
@@ -127,11 +128,71 @@ pub fn encode(k: &KeyEvent, app_cursor: bool) -> Vec<u8> {
     out
 }
 
+/// Encode a mouse event at 0-based pane coordinates, or None if the child's
+/// mouse mode doesn't report it or the encoding can't hold the position.
+pub fn encode_mouse(
+    m: &MouseEvent,
+    mode: MouseProtocolMode,
+    enc: MouseProtocolEncoding,
+) -> Option<Vec<u8>> {
+    use MouseProtocolMode::{AnyMotion, ButtonMotion, PressRelease};
+    let reported = match m.kind {
+        MouseEventKind::Up(_) => matches!(mode, PressRelease | ButtonMotion | AnyMotion),
+        MouseEventKind::Drag(_) => matches!(mode, ButtonMotion | AnyMotion),
+        MouseEventKind::Moved => mode == AnyMotion,
+        _ => mode != MouseProtocolMode::None,
+    };
+    if !reported {
+        return None;
+    }
+    let button = |b: MouseButton| match b {
+        MouseButton::Left => 0u32,
+        MouseButton::Middle => 1,
+        MouseButton::Right => 2,
+    };
+    let code = match m.kind {
+        MouseEventKind::Down(b) | MouseEventKind::Up(b) => button(b),
+        MouseEventKind::Drag(b) => button(b) + 32,
+        MouseEventKind::Moved => 3 + 32,
+        MouseEventKind::ScrollUp => 64,
+        MouseEventKind::ScrollDown => 65,
+        MouseEventKind::ScrollLeft => 66,
+        MouseEventKind::ScrollRight => 67,
+    };
+    let mods = 4 * (m.modifiers.contains(KeyModifiers::SHIFT) as u32)
+        + 8 * (m.modifiers.contains(KeyModifiers::ALT) as u32)
+        + 16 * (m.modifiers.contains(KeyModifiers::CONTROL) as u32);
+    let release = matches!(m.kind, MouseEventKind::Up(_));
+    let (x, y) = (m.column as u32 + 1, m.row as u32 + 1);
+    // Only SGR can say which button was released.
+    let legacy = 32 + mods + if release { 3 } else { code };
+    match enc {
+        MouseProtocolEncoding::Sgr => {
+            let end = if release { 'm' } else { 'M' };
+            Some(format!("\x1b[<{};{x};{y}{end}", code + mods).into_bytes())
+        }
+        MouseProtocolEncoding::Default => {
+            let (x, y) = (u8::try_from(32 + x).ok()?, u8::try_from(32 + y).ok()?);
+            Some(vec![0x1b, b'[', b'M', legacy as u8, x, y])
+        }
+        MouseProtocolEncoding::Utf8 => {
+            if x.max(y) > 2015 {
+                return None;
+            }
+            let c = |v| char::from_u32(v).unwrap_or(' ');
+            Some(format!("\x1b[M{}{}{}", c(legacy), c(32 + x), c(32 + y)).into_bytes())
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     fn k(code: KeyCode, m: KeyModifiers) -> KeyEvent {
         KeyEvent::new(code, m)
+    }
+    fn mouse(kind: MouseEventKind, column: u16, row: u16, modifiers: KeyModifiers) -> MouseEvent {
+        MouseEvent { kind, column, row, modifiers }
     }
     #[test]
     fn encoding() {
@@ -143,5 +204,55 @@ mod tests {
         assert_eq!(encode(&k(KeyCode::Char('é'), KeyModifiers::NONE), false), "é".as_bytes());
         let p = parse_prefix("ctrl-b");
         assert!(is_prefix(&k(KeyCode::Char('b'), KeyModifiers::CONTROL), &p));
+    }
+    #[test]
+    fn mouse_sgr() {
+        let enc = |kind, m| {
+            encode_mouse(&mouse(kind, 4, 9, m), MouseProtocolMode::AnyMotion, MouseProtocolEncoding::Sgr).unwrap()
+        };
+        let none = KeyModifiers::NONE;
+        assert_eq!(enc(MouseEventKind::ScrollUp, none), b"\x1b[<64;5;10M");
+        assert_eq!(enc(MouseEventKind::ScrollDown, none), b"\x1b[<65;5;10M");
+        assert_eq!(enc(MouseEventKind::Down(MouseButton::Left), none), b"\x1b[<0;5;10M");
+        assert_eq!(enc(MouseEventKind::Up(MouseButton::Right), none), b"\x1b[<2;5;10m");
+        assert_eq!(enc(MouseEventKind::Drag(MouseButton::Left), none), b"\x1b[<32;5;10M");
+        assert_eq!(enc(MouseEventKind::Moved, none), b"\x1b[<35;5;10M");
+        let all = KeyModifiers::SHIFT | KeyModifiers::ALT | KeyModifiers::CONTROL;
+        assert_eq!(enc(MouseEventKind::ScrollUp, all), b"\x1b[<92;5;10M");
+    }
+    #[test]
+    fn mouse_legacy_encodings() {
+        let none = KeyModifiers::NONE;
+        let (mode, def, utf8) =
+            (MouseProtocolMode::PressRelease, MouseProtocolEncoding::Default, MouseProtocolEncoding::Utf8);
+        let down = MouseEventKind::Down(MouseButton::Left);
+        let up = MouseEventKind::Up(MouseButton::Left);
+        assert_eq!(encode_mouse(&mouse(down, 0, 1, none), mode, def).unwrap(), b"\x1b[M\x20\x21\x22");
+        assert_eq!(encode_mouse(&mouse(up, 0, 1, none), mode, def).unwrap(), b"\x1b[M\x23\x21\x22");
+        assert_eq!(encode_mouse(&mouse(down, 222, 0, none), mode, def).unwrap()[4], 255);
+        assert_eq!(encode_mouse(&mouse(down, 223, 0, none), mode, def), None);
+        assert_eq!(
+            encode_mouse(&mouse(down, 299, 0, none), mode, utf8).unwrap(),
+            "\x1b[M\u{20}\u{14c}\u{21}".as_bytes()
+        );
+        assert_eq!(encode_mouse(&mouse(down, 2015, 0, none), mode, utf8), None);
+    }
+    #[test]
+    fn mouse_mode_filters_events() {
+        use MouseProtocolMode as M;
+        let reports = |kind, mode| {
+            encode_mouse(&mouse(kind, 0, 0, KeyModifiers::NONE), mode, MouseProtocolEncoding::Sgr).is_some()
+        };
+        let down = MouseEventKind::Down(MouseButton::Left);
+        let up = MouseEventKind::Up(MouseButton::Left);
+        let drag = MouseEventKind::Drag(MouseButton::Left);
+        let wheel = MouseEventKind::ScrollUp;
+        for kind in [down, up, drag, wheel, MouseEventKind::Moved] {
+            assert!(!reports(kind, M::None));
+            assert!(reports(kind, M::AnyMotion));
+        }
+        assert!(reports(down, M::Press) && reports(wheel, M::Press) && !reports(up, M::Press));
+        assert!(reports(up, M::PressRelease) && !reports(drag, M::PressRelease));
+        assert!(reports(drag, M::ButtonMotion) && !reports(MouseEventKind::Moved, M::ButtonMotion));
     }
 }

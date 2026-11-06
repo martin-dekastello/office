@@ -389,7 +389,7 @@ fn draw_help(app: &App, f: &mut Frame, area: Rect) {
         ("d / a / u".into(), "move issue to done / archive / active"),
         ("n".into(), "new local issue"),
         ("S / r".into(), "sync GitHub/Jira"),
-        ("[ / ]".into(), "scroll back / forward (also mouse wheel)"),
+        ("[ / ]".into(), "scroll the tab back / forward (also mouse wheel)"),
         (p.to_string(), "send the prefix key itself"),
         ("q".into(), "quit"),
         ("".into(), ""),

@@ -136,6 +136,8 @@ pub struct App {
     pub term_rect: Rect,
     pub sidebar_rect: Rect,
     pub tab_hits: Vec<(Rect, usize)>,
+    /// A mouse press went to the pane, so its drag and release go there too.
+    pane_drag: bool,
     pub item_hits: Vec<(Rect, String)>,
     last_scan: Instant,
     last_status: Instant,
@@ -180,6 +182,7 @@ impl App {
             term_rect: Rect::default(),
             sidebar_rect: Rect::default(),
             tab_hits: vec![],
+            pane_drag: false,
             item_hits: vec![],
             last_scan: Instant::now(),
             last_status: Instant::now(),
@@ -747,6 +750,21 @@ impl App {
         }
     }
 
+    /// Offer a mouse event to the active pane, clamped to its area. False if
+    /// the pane's app doesn't want it.
+    fn forward_mouse(&mut self, m: MouseEvent) -> bool {
+        let r = self.term_rect;
+        if self.mode != Mode::Normal || r.is_empty() {
+            return false;
+        }
+        let local = MouseEvent {
+            column: m.column.clamp(r.left(), r.right() - 1) - r.left(),
+            row: m.row.clamp(r.top(), r.bottom() - 1) - r.top(),
+            ..m
+        };
+        self.active_pane_mut().is_some_and(|p| p.send_mouse(&local))
+    }
+
     fn on_mouse(&mut self, m: MouseEvent) {
         let pos = Position::new(m.column, m.row);
         match m.kind {
@@ -761,15 +779,31 @@ impl App {
                     if self.active_pane_mut().is_some() {
                         self.focus = Focus::Terminal;
                     }
+                    self.pane_drag = self.forward_mouse(m);
                 } else if self.sidebar_rect.contains(pos) {
                     self.focus = Focus::Sidebar;
                 }
             }
+            MouseEventKind::Down(_) if self.term_rect.contains(pos) => {
+                self.pane_drag = self.forward_mouse(m);
+            }
+            MouseEventKind::Drag(_) if self.pane_drag => {
+                self.forward_mouse(m);
+            }
+            MouseEventKind::Up(_) if self.pane_drag => {
+                self.forward_mouse(m);
+                self.pane_drag = false;
+            }
+            MouseEventKind::Moved if self.term_rect.contains(pos) => {
+                self.forward_mouse(m);
+            }
             MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
                 let up = m.kind == MouseEventKind::ScrollUp;
                 if self.term_rect.contains(pos) {
-                    if let Some(p) = self.active_pane_mut() {
-                        p.scroll_by(if up { 3 } else { -3 });
+                    if self.mode == Mode::Normal && !self.forward_mouse(m) {
+                        if let Some(p) = self.active_pane_mut() {
+                            p.scroll_by(if up { 3 } else { -3 });
+                        }
                     }
                 } else if self.sidebar_rect.contains(pos) {
                     self.move_selection(if up { -1 } else { 1 });
@@ -981,13 +1015,13 @@ impl App {
             KeyCode::Char('[') | KeyCode::PageUp => {
                 let h = self.term_rect.height as isize / 2;
                 if let Some(p) = self.active_pane_mut() {
-                    p.scroll_by(h.max(1));
+                    p.scroll_page(true, h.max(1));
                 }
             }
             KeyCode::Char(']') | KeyCode::PageDown => {
                 let h = self.term_rect.height as isize / 2;
                 if let Some(p) = self.active_pane_mut() {
-                    p.scroll_by(-h.max(1));
+                    p.scroll_page(false, h.max(1));
                 }
             }
             _ => {
