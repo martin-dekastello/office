@@ -23,6 +23,9 @@ pub struct TabState {
     pub custom_name: bool,
     #[serde(default)]
     pub claude_session: Option<String>,
+    /// Chosen when the tab was created; overrides the issue's working directory.
+    #[serde(default)]
+    pub cwd: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

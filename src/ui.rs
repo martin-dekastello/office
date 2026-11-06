@@ -76,6 +76,7 @@ pub fn draw(app: &mut App, f: &mut Frame) {
             let title = match kind {
                 PromptKind::NewIssue => " New local issue — title ",
                 PromptKind::RenameTab => " Rename tab (empty = auto) ",
+                PromptKind::ClaudeDir => " New Claude tab — directory (empty = issue default) ",
             };
             draw_prompt(f, area, title, &buf);
         }
@@ -270,7 +271,7 @@ fn draw_terminal(app: &mut App, f: &mut Frame, area: Rect) {
     let Some(tab) = tab else {
         let text = match app.selected_note() {
             Some(n) => format!(
-                "{}  {}\n\n{}\n\n⏎ start a Claude session for this issue\nc  new Claude tab   t  shell tab   e  edit note   o  open in Obsidian",
+                "{}  {}\n\n{}\n\n⏎ start a Claude session for this issue\nc  new Claude tab   C  …in a chosen directory\nt  shell tab   e  edit note   o  open in Obsidian",
                 n.id,
                 n.title,
                 n.path.display()
@@ -282,7 +283,7 @@ fn draw_terminal(app: &mut App, f: &mut Frame, area: Rect) {
                 .alignment(Alignment::Center)
                 .style(Style::new().fg(FG_DIM))
                 .wrap(Wrap { trim: false }),
-            centered(area, area.width.saturating_sub(4), 8),
+            centered(area, area.width.saturating_sub(4), 9),
         );
         return;
     };
@@ -341,7 +342,7 @@ fn draw_statusbar(app: &mut App, f: &mut Frame, area: Rect) {
     }
     let wt = app
         .current_rt()
-        .and_then(|r| r.worktree.as_ref())
+        .and_then(|r| r.tabs.get(r.active).and_then(|t| t.st.cwd.as_ref()).or(r.worktree.as_ref()))
         .and_then(|p| p.file_name())
         .map(|n| format!("⎇ {}", n.to_string_lossy()))
         .unwrap_or_default();
@@ -380,6 +381,7 @@ fn draw_help(app: &App, f: &mut Frame, area: Rect) {
         (format!("Anywhere: {p} then…"), ""),
         ("s / Tab".into(), "toggle sidebar ↔ terminal focus"),
         ("c / t / e".into(), "new Claude / shell / note-editor tab"),
+        ("C".into(), "new Claude tab in a chosen directory"),
         ("1-9, h/l".into(), "go to tab, prev/next tab"),
         ("j / k".into(), "next/prev issue"),
         ("x  ,".into(), "close tab, rename tab"),

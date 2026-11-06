@@ -14,7 +14,7 @@ use crossterm::event::{
 use ratatui::layout::{Position, Rect};
 use std::collections::HashMap;
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver};
 use std::time::{Duration, Instant};
 
@@ -96,6 +96,7 @@ pub enum Focus {
 pub enum PromptKind {
     NewIssue,
     RenameTab,
+    ClaudeDir,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -143,6 +144,12 @@ pub struct App {
 
 fn now_ms() -> i64 {
     chrono::Utc::now().timestamp_millis()
+}
+
+/// Absolute path of a typed directory, or None if it isn't one.
+fn resolve_dir(input: &str) -> Option<PathBuf> {
+    let dir = std::fs::canonicalize(crate::config::expand(Path::new(input))).ok()?;
+    dir.is_dir().then_some(dir)
 }
 
 impl App {
@@ -434,7 +441,12 @@ impl App {
 
     fn spawn_pane(&mut self, id: &str, idx: usize) {
         let Some(note) = self.notes.iter().find(|n| n.id == id).cloned() else { return };
-        let cwd = self.workdir(&note);
+        // A session can only be resumed from the directory it started in.
+        let chosen = self.rt_for(id).tabs.get(idx).and_then(|t| t.st.cwd.clone());
+        let cwd = match chosen.filter(|p| p.is_dir()) {
+            Some(p) => p,
+            None => self.workdir(&note),
+        };
         let (rows, cols) = (self.term_rect.height.max(5), self.term_rect.width.max(20));
         let rt = self.rt_for(id);
         let Some(tab) = rt.tabs.get(idx) else { return };
@@ -479,6 +491,10 @@ impl App {
     }
 
     fn new_tab(&mut self, kind: TabKind) {
+        self.new_tab_in(kind, None);
+    }
+
+    fn new_tab_in(&mut self, kind: TabKind, cwd: Option<PathBuf>) {
         let Some(id) = self.selected.clone() else {
             self.flash("Select an issue first".into());
             return;
@@ -495,12 +511,27 @@ impl App {
             kind,
             custom_name: false,
             claude_session: None,
+            cwd,
         }));
         rt.active = rt.tabs.len() - 1;
         let idx = rt.active;
         self.persist(&id);
         self.spawn_pane(&id, idx);
         self.focus = Focus::Terminal;
+    }
+
+    /// Start a Claude tab in a typed directory; empty means the issue's default.
+    fn new_claude_in(&mut self, input: String) {
+        let dir = input.trim();
+        if dir.is_empty() {
+            self.new_tab(TabKind::Claude);
+        } else if let Some(p) = resolve_dir(dir) {
+            self.msg = None;
+            self.new_tab_in(TabKind::Claude, Some(p));
+        } else {
+            self.flash(format!("Not a directory: {dir}"));
+            self.mode = Mode::Prompt(PromptKind::ClaudeDir, input);
+        }
     }
 
     /// Open the issue: focus the terminal, starting/resuming the active tab.
@@ -769,6 +800,7 @@ impl App {
                     match kind {
                         PromptKind::NewIssue => self.new_local_issue(buf),
                         PromptKind::RenameTab => self.rename_tab(buf),
+                        PromptKind::ClaudeDir => self.new_claude_in(buf),
                     }
                 }
                 KeyCode::Backspace => {
@@ -860,6 +892,13 @@ impl App {
     fn on_command(&mut self, k: KeyEvent) -> bool {
         match k.code {
             KeyCode::Char('c') => self.new_tab(TabKind::Claude),
+            KeyCode::Char('C') => {
+                if self.selected.is_some() {
+                    self.mode = Mode::Prompt(PromptKind::ClaudeDir, String::new());
+                } else {
+                    self.flash("Select an issue first".into());
+                }
+            }
             KeyCode::Char('t') => self.new_tab(TabKind::Shell),
             KeyCode::Char('e') => self.new_tab(TabKind::Notes),
             KeyCode::Char('o') => self.open_obsidian(),
@@ -1021,8 +1060,25 @@ mod tests {
             kind: TabKind::Claude,
             custom_name: false,
             claude_session: None,
+            cwd: None,
         };
         Tab { status, status_ts, esc_ts, ..Tab::new(st) }
+    }
+
+    #[test]
+    fn resolve_dir_accepts_only_directories() {
+        let dir = std::env::temp_dir().join(format!("office-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("file");
+        std::fs::write(&file, "").unwrap();
+
+        let got = resolve_dir(dir.to_str().unwrap()).unwrap();
+        assert!(got.is_absolute() && got.is_dir());
+        assert_eq!(resolve_dir(file.to_str().unwrap()), None);
+        assert_eq!(resolve_dir(dir.join("missing").to_str().unwrap()), None);
+        assert_eq!(resolve_dir("~"), dirs::home_dir().and_then(|h| std::fs::canonicalize(h).ok()));
+
+        std::fs::remove_dir_all(dir).ok();
     }
 
     #[test]
