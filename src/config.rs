@@ -38,6 +38,9 @@ pub struct Config {
     pub notes_dir: String,
     /// Where per-issue git worktrees are created: <worktrees_dir>/<repo>/<id>-<slug>
     pub worktrees_dir: PathBuf,
+    /// Creates an issue's worktree instead of plain `git worktree add`. Run as
+    /// `<command…> <repo> <id>-<slug>` in the repo; prints the worktree's path last.
+    pub worktree_command: Vec<String>,
     /// Command used for Claude tabs.
     pub claude_command: Vec<String>,
     /// Command used for shell tabs. Empty = $SHELL / %COMSPEC%.
@@ -76,6 +79,7 @@ impl Default for Config {
                 .join("Obsidian"),
             notes_dir: "Issues".into(),
             worktrees_dir: home.join("worktrees"),
+            worktree_command: vec![],
             claude_command: claude,
             shell_command: vec![],
             editor_command: vec![],
@@ -99,6 +103,11 @@ notes_dir = "Issues"
 
 # Per-issue git worktrees go to <worktrees_dir>/<repo>/<id>-<slug>
 worktrees_dir = "{WORKTREES}"
+
+# Your own script for creating worktrees, run as `<command…> <repo> <id>-<slug>` in the
+# repo when an issue's first Claude or shell tab opens. It must print the worktree's
+# path as its last line of output. Default: `git worktree add` into worktrees_dir.
+# worktree_command = ["~/bin/make-worktree.sh"]
 
 # tmux-style prefix key. Press it twice to send it to the terminal.
 prefix = "ctrl-a"

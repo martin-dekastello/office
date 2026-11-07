@@ -18,7 +18,7 @@ use ratatui::layout::{Position, Rect};
 use std::collections::HashMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::{self, Receiver};
+use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::time::{Duration, Instant};
 
 /// How long after Esc a Claude tab may stay silent before it counts as interrupted.
@@ -120,15 +120,39 @@ impl Tab {
     }
 }
 
+/// A worktree being created in the background, and the tabs waiting to start in it.
+pub struct WorktreeJob {
+    rx: Receiver<Result<PathBuf, String>>,
+    waiting: Vec<String>,
+    /// Where the tabs start if creating it fails; None reports the failure instead.
+    fallback: Option<PathBuf>,
+}
+
 #[derive(Default)]
 pub struct IssueRt {
     pub tabs: Vec<Tab>,
     pub active: usize,
     pub worktree: Option<PathBuf>,
     pub closed: Vec<TabState>,
+    pub creating: Option<WorktreeJob>,
+    /// Why the worktree script last failed, until it's tried again.
+    pub worktree_error: Option<String>,
+}
+
+/// Where a tab that needs the issue's checkout starts.
+enum Workdir {
+    Ready(PathBuf),
+    /// The worktree is being created; the tab starts when it's done.
+    Pending,
+    NoRepo,
 }
 
 impl IssueRt {
+    /// The tab is waiting for its worktree to be created.
+    pub fn awaits_worktree(&self, tab: &Tab) -> bool {
+        self.creating.as_ref().is_some_and(|j| j.waiting.contains(&tab.st.id))
+    }
+
     pub fn rollup(&self) -> Option<ClaudeStatus> {
         self.tabs
             .iter()
@@ -200,6 +224,8 @@ pub struct App {
     pub completion: Option<Completion>,
     pub prefix: (KeyCode, KeyModifiers),
     pub msg: Option<(String, Instant)>,
+    /// The message is an error: shown in red, for longer.
+    pub msg_error: bool,
     sync_rx: Option<Receiver<SyncReport>>,
     pub syncing: bool,
     pub spinner: usize,
@@ -268,6 +294,7 @@ impl App {
             completion: None,
             prefix,
             msg: None,
+            msg_error: false,
             sync_rx: None,
             syncing: false,
             spinner: 0,
@@ -312,6 +339,12 @@ impl App {
 
     pub fn flash(&mut self, s: String) {
         self.msg = Some((s, Instant::now()));
+        self.msg_error = false;
+    }
+
+    pub fn flash_error(&mut self, s: String) {
+        self.msg = Some((s, Instant::now()));
+        self.msg_error = true;
     }
 
     pub fn prefix_label(&self) -> String {
@@ -485,6 +518,7 @@ impl App {
                 worktree: st.worktree.clone(),
                 tabs: st.tabs.into_iter().map(Tab::new).collect(),
                 closed: st.closed,
+                ..Default::default()
             };
             self.rt.insert(id.to_string(), rt);
         }
@@ -527,41 +561,103 @@ impl App {
         usable_default(self.state.default_dir.as_deref(), home())
     }
 
-    /// Working directory for an issue, creating its worktree on first use.
-    /// None if the issue has no repo.
-    fn workdir(&mut self, note: &Note) -> Option<PathBuf> {
-        if let Some(wt) = self.rt_for(&note.id).worktree.clone() {
-            if wt.exists() {
-                return Some(wt);
+    /// Working directory for an issue's tab. The worktree is created the first
+    /// time a tab needs it, in the background, and the tab starts once it exists.
+    fn workdir(&mut self, note: &Note, tab: &str) -> Workdir {
+        let rt = self.rt_for(&note.id);
+        if let Some(wt) = rt.worktree.clone().filter(|p| p.exists()) {
+            return Workdir::Ready(wt);
+        }
+        if let Some(job) = &mut rt.creating {
+            if !job.waiting.iter().any(|t| t == tab) {
+                job.waiting.push(tab.to_string());
             }
+            return Workdir::Pending;
         }
         let repo = note
             .repo_path
             .clone()
             .or_else(|| self.cfg.repo_path_for(&note.source, note.repo.as_deref()));
-        let repo = repo?;
-        match worktree::ensure(&repo, &self.cfg.worktrees_dir, &note.stem()) {
-            Ok(p) => {
-                self.rt_for(&note.id).worktree = Some(p.clone());
-                self.persist(&note.id);
-                Some(p)
-            }
-            Err(e) => {
-                self.flash(format!("Worktree failed, using repo: {e:#}"));
-                Some(repo)
+        let Some(repo) = repo else { return Workdir::NoRepo };
+        let command = self.cfg.worktree_command.clone();
+        let dir = self.cfg.worktrees_dir.clone();
+        let (stem, issue) = (note.stem(), note.id.clone());
+        // Plain git falls back to the repo as it always has; a script the user
+        // wrote reports its failure instead, as the repo is unlikely what they want.
+        let fallback = command.is_empty().then(|| repo.clone());
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let r = if command.is_empty() {
+                worktree::ensure(&repo, &dir, &stem)
+            } else {
+                worktree::run_script(&command, &repo, &dir, &stem, &issue)
+            };
+            let _ = tx.send(r.map_err(|e| format!("{e:#}")));
+        });
+        let rt = self.rt_for(&note.id);
+        rt.worktree_error = None;
+        rt.creating = Some(WorktreeJob { rx, waiting: vec![tab.to_string()], fallback });
+        Workdir::Pending
+    }
+
+    /// Start the tabs whose worktree has been created, or report why it wasn't.
+    fn poll_worktrees(&mut self) {
+        let ids: Vec<String> = self.rt.iter().filter(|(_, r)| r.creating.is_some()).map(|(id, _)| id.clone()).collect();
+        for id in ids {
+            let Some(rt) = self.rt.get_mut(&id) else { continue };
+            let Some(job) = &rt.creating else { continue };
+            let result = match job.rx.try_recv() {
+                Ok(r) => r,
+                Err(TryRecvError::Empty) => continue,
+                Err(TryRecvError::Disconnected) => Err("worktree creation stopped unexpectedly".into()),
+            };
+            let Some(job) = rt.creating.take() else { continue };
+            let cwd = match (result, job.fallback) {
+                (Ok(p), _) => {
+                    rt.worktree = Some(p.clone());
+                    self.persist(&id);
+                    p
+                }
+                (Err(e), Some(repo)) => {
+                    self.flash(format!("Worktree failed, using repo: {e}"));
+                    repo
+                }
+                (Err(e), None) => {
+                    // The script's own last words usually say what went wrong.
+                    let last = e.lines().rfind(|l| !l.trim().is_empty()).unwrap_or_default().trim().to_string();
+                    rt.worktree_error = Some(e);
+                    self.flash_error(format!("{id}: worktree script failed: {last}"));
+                    continue;
+                }
+            };
+            let Some(note) = self.notes.iter().find(|n| n.id == id).cloned() else { continue };
+            for tab in job.waiting {
+                let rt = self.rt_for(&id);
+                // It may have been closed, or started elsewhere, while it waited.
+                if let Some(idx) = rt.tabs.iter().position(|t| t.st.id == tab && t.pane.is_none()) {
+                    self.start_pane(&note, idx, cwd.clone());
+                }
             }
         }
     }
 
     fn spawn_pane(&mut self, id: &str, idx: usize) {
         let Some(note) = self.notes.iter().find(|n| n.id == id).cloned() else { return };
+        let Some(tab) = self.rt_for(id).tabs.get(idx) else { return };
+        let (kind, tab_id) = (tab.st.kind, tab.st.id.clone());
         // A session can only be resumed from the directory it started in.
-        let chosen = self.rt_for(id).tabs.get(idx).and_then(|t| t.st.cwd.clone());
+        let chosen = tab.st.cwd.clone();
         let cwd = match chosen.filter(|p| p.is_dir()) {
             Some(p) => p,
-            None => match self.workdir(&note) {
+            // Editing the note needs no checkout, so it never creates one.
+            None if kind == TabKind::Notes => match self.rt_for(id).worktree.clone().filter(|p| p.is_dir()) {
                 Some(p) => p,
-                None => {
+                None => self.default_dir(),
+            },
+            None => match self.workdir(&note, &tab_id) {
+                Workdir::Ready(p) => p,
+                Workdir::Pending => return,
+                Workdir::NoRepo => {
                     let default = self.default_dir();
                     let Some(tab) = self.rt_for(id).tabs.get_mut(idx) else { return };
                     let dir = tab.st.settle_dir(&default, &home());
@@ -571,6 +667,11 @@ impl App {
                 }
             },
         };
+        self.start_pane(&note, idx, cwd);
+    }
+
+    fn start_pane(&mut self, note: &Note, idx: usize, cwd: PathBuf) {
+        let id = note.id.as_str();
         let (rows, cols) = (self.term_rect.height.max(5), self.term_rect.width.max(20));
         let rt = self.rt_for(id);
         let Some(tab) = rt.tabs.get(idx) else { return };
@@ -890,8 +991,9 @@ impl App {
             // Picks up notes moved/renamed/created in Obsidian.
             self.rescan();
         }
+        self.poll_worktrees();
         if let Some((_, t)) = &self.msg {
-            if t.elapsed() > Duration::from_secs(6) {
+            if t.elapsed() > Duration::from_secs(if self.msg_error { 15 } else { 6 }) {
                 self.msg = None;
             }
         }
