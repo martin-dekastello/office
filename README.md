@@ -24,7 +24,9 @@ Issues on the left, Claude Code tabs on the right, one Obsidian note per issue.
   file per issue. Moving an issue to done/archive moves the file and updates `status:`.
   Each new Claude session is logged under `## Sessions` with its `claude --resume <id>` command.
 - **One git worktree + branch per issue** (`<worktrees_dir>/<repo>/<id>-<slug>`), so all
-  tabs of an issue share one checkout.
+  tabs of an issue share one checkout. It's created when the issue's first Claude or shell tab
+  opens, not before, so issues you never work on take no disk space. Bring your own script
+  with `worktree_command`.
 - **Sessions can be stopped and picked up again.** Press `z` to suspend an inactive Claude
   tab: its process stops and its RAM is freed, but you can still scroll its saved screen,
   and `⏎` continues it with `claude --resume <session>`. A Claude tab that exits or was
@@ -68,6 +70,35 @@ email = "you@example.com"
 token_env = "JIRA_API_TOKEN"
 jql = "assignee = currentUser() AND statusCategory != Done ORDER BY updated DESC"
 path = "~/code/backend"
+```
+
+### Your own worktree script
+
+If a plain `git worktree add` isn't how you set up a checkout, set `worktree_command`:
+
+```toml
+worktree_command = ["~/bin/make-worktree.sh"]
+```
+
+office runs it as `make-worktree.sh <repo> <id>-<slug>` (e.g. `~/code/backend PROJ-118-fix-oauth-login-loop`)
+from inside the repo, the first time an issue's Claude or shell tab opens. The second argument
+works as a folder or branch name as is. `OFFICE_REPO`, `OFFICE_WORKTREE_NAME`,
+`OFFICE_WORKTREES_DIR` and `OFFICE_ISSUE` hold the same and more. The script must print the
+worktree's path as its **last line of output** (a relative path is taken from the repo). Send
+anything else to stderr. office remembers the path and runs the script again only if that
+directory disappears.
+
+It runs in the background and the tab shows a spinner until it's done. If it exits non-zero or
+prints a path that doesn't exist, the tab shows its error output and `⏎` runs it again. office
+doesn't fall back to the repo as it does when plain `git worktree add` fails.
+
+```sh
+#!/bin/sh
+set -e
+dest="$HOME/wt/$2"
+[ -d "$dest" ] || git -C "$1" worktree add -b "feature/$2" "$dest" origin/main >&2
+cp "$1/.env" "$dest/" 2>/dev/null || true
+echo "$dest"
 ```
 
 To point one issue at a different repo, add `repo_path: ~/code/other` to that note's

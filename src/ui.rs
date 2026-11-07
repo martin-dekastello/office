@@ -1,4 +1,4 @@
-use crate::app::{App, ConfirmKind, Focus, Mode, PromptKind, Tab};
+use crate::app::{App, ConfirmKind, Focus, IssueRt, Mode, PromptKind, Tab};
 use crate::complete::Completion;
 use crate::state::TabKind;
 use crate::status::ClaudeStatus;
@@ -38,7 +38,10 @@ pub fn status_glyph(s: ClaudeStatus, spin: usize) -> (&'static str, Style) {
     }
 }
 
-fn tab_glyph(t: &Tab, spin: usize) -> (&'static str, Style) {
+fn tab_glyph(t: &Tab, rt: Option<&IssueRt>, spin: usize) -> (&'static str, Style) {
+    if rt.is_some_and(|r| r.awaits_worktree(t)) {
+        return (SPIN[spin % SPIN.len()], Style::new().fg(FG_DIM));
+    }
     if t.pane.is_none() {
         return ("–", Style::new().fg(FG_DIM));
     }
@@ -246,7 +249,7 @@ fn draw_tabbar(app: &mut App, f: &mut Frame, area: Rect) {
     let mut hits = vec![];
     let mut close_hits = vec![];
     for (i, t) in tabs.iter().enumerate() {
-        let (g, gs) = tab_glyph(t, app.spinner);
+        let (g, gs) = tab_glyph(t, app.current_rt(), app.spinner);
         let is_active = i == active;
         let attention = t.st.kind == TabKind::Claude && t.pane.is_some() && t.shown_status() == ClaudeStatus::Attention;
         let bg = if is_active { BG_TAB_ACTIVE } else { BG_TAB };
@@ -312,17 +315,25 @@ fn draw_terminal(app: &mut App, f: &mut Frame, area: Rect) {
             draw_snapshot(snap, &app.prefix_label(), f, area);
             return;
         }
+        let rt = app.current_rt();
         let what = match (&tab.st.kind, &tab.st.claude_session) {
+            _ if rt.is_some_and(|r| r.awaits_worktree(tab)) => "Creating the worktree…".into(),
+            (_, None) if rt.and_then(|r| r.worktree_error.as_ref()).is_some() => format!(
+                "Worktree script failed:\n\n{}\n\n⏎ try again",
+                rt.and_then(|r| r.worktree_error.as_deref()).unwrap_or_default()
+            ),
             (TabKind::Claude, Some(sid)) => format!("Claude session {sid} is suspended.\n\n⏎ resume it"),
             (TabKind::Claude, None) => "Claude tab is not running.\n\n⏎ start it".into(),
             _ => "Tab is not running.\n\n⏎ start it".into(),
         };
+        let text = format!("{}\n\n{what}", tab.st.name);
+        let h = (text.lines().count() as u16 + 2).max(7);
         f.render_widget(
-            Paragraph::new(format!("{}\n\n{what}", tab.st.name))
+            Paragraph::new(text)
                 .alignment(Alignment::Center)
                 .style(Style::new().fg(FG_DIM))
                 .wrap(Wrap { trim: false }),
-            centered(area, area.width.saturating_sub(4), 7),
+            centered(area, area.width.saturating_sub(4), h),
         );
         return;
     };
@@ -386,7 +397,8 @@ fn draw_statusbar(app: &mut App, f: &mut Frame, area: Rect) {
         left.push(Span::styled(format!(" {} ", app.prefix_label()), Style::new().fg(Color::Black).bg(ORANGE).add_modifier(Modifier::BOLD)));
     }
     if let Some((m, _)) = &app.msg {
-        left.push(Span::styled(format!(" {m}"), Style::new().fg(AMBER)));
+        let color = if app.msg_error { RED } else { AMBER };
+        left.push(Span::styled(format!(" {m}"), Style::new().fg(color)));
     } else if let Some(n) = app.selected_note() {
         left.push(Span::styled(format!(" {} ", n.id), Style::new().fg(GREEN).add_modifier(Modifier::BOLD)));
         left.push(Span::styled(n.title.clone(), Style::new().fg(FG)));
