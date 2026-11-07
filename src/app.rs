@@ -1,3 +1,4 @@
+use crate::api::{self, Reply, Request};
 use crate::clipboard;
 use crate::complete::{self, Completion};
 use crate::config::Config;
@@ -37,11 +38,14 @@ pub struct Tab {
     /// Set when the process exits, until the tab is checked on the next poll;
     /// true if it never got as far as a hook, as when `--resume` fails.
     exit_check: Option<bool>,
+    /// Extra Claude arguments for the first launch only (mode, first prompt);
+    /// a resumed session never gets them again.
+    first_args: Vec<String>,
 }
 
 impl Tab {
     fn new(st: TabState) -> Tab {
-        Tab { st, pane: None, status: ClaudeStatus::Exited, status_ts: 0, seen_ts: 0, esc_ts: None, exit_check: None }
+        Tab { st, pane: None, status: ClaudeStatus::Exited, status_ts: 0, seen_ts: 0, esc_ts: None, exit_check: None, first_args: vec![] }
     }
 
     /// Status as shown: "Done" turns into "Idle" once you've looked at the tab.
@@ -674,8 +678,9 @@ impl App {
         let id = note.id.as_str();
         let (rows, cols) = (self.term_rect.height.max(5), self.term_rect.width.max(20));
         let rt = self.rt_for(id);
-        let Some(tab) = rt.tabs.get(idx) else { return };
+        let Some(tab) = rt.tabs.get_mut(idx) else { return };
         let st = tab.st.clone();
+        let first_args = std::mem::take(&mut tab.first_args);
         let argv: Vec<String> = match st.kind {
             TabKind::Claude => {
                 let mut v = self.cfg.claude_command.clone();
@@ -686,6 +691,8 @@ impl App {
                 if let Some(sid) = &st.claude_session {
                     v.push("--resume".into());
                     v.push(sid.clone());
+                } else {
+                    v.extend(first_args);
                 }
                 v
             }
@@ -696,11 +703,14 @@ impl App {
                 v
             }
         };
-        let env = vec![
+        let mut env = vec![
             ("OFFICE_TAB".to_string(), st.id.clone()),
             ("OFFICE_ISSUE".to_string(), note.id.clone()),
             ("OFFICE_NOTE".to_string(), note.path.to_string_lossy().into_owned()),
         ];
+        if let Ok(exe) = std::env::current_exe() {
+            env.push(("OFFICE_BIN".to_string(), exe.to_string_lossy().into_owned()));
+        }
         status::clear_status(&st.id);
         let result = Pane::spawn(&argv, &cwd, &env, rows, cols);
         let rt = self.rt_for(id);
@@ -728,25 +738,79 @@ impl App {
         if kind == TabKind::Claude {
             self.start_work(&id);
         }
-        let name = match kind {
+        self.add_tab(&id, kind, None, cwd, vec![], true);
+        self.focus = Focus::Terminal;
+    }
+
+    /// Add a tab to an issue and start it. Returns the new tab's id. Unless
+    /// `activate`, the issue's active tab stays as it was.
+    fn add_tab(
+        &mut self,
+        issue: &str,
+        kind: TabKind,
+        name: Option<String>,
+        cwd: Option<PathBuf>,
+        first_args: Vec<String>,
+        activate: bool,
+    ) -> String {
+        let default = match kind {
             TabKind::Claude => "claude",
             TabKind::Shell => "shell",
             TabKind::Notes => "notes",
         };
-        let rt = self.rt_for(&id);
-        rt.tabs.push(Tab::new(TabState {
-            id: uuid::Uuid::new_v4().to_string(),
-            name: name.into(),
+        let tab_id = uuid::Uuid::new_v4().to_string();
+        let mut tab = Tab::new(TabState {
+            id: tab_id.clone(),
+            custom_name: name.is_some(),
+            name: name.unwrap_or_else(|| default.into()),
             kind,
-            custom_name: false,
             claude_session: None,
             cwd,
-        }));
-        rt.active = rt.tabs.len() - 1;
-        let idx = rt.active;
-        self.persist(&id);
-        self.spawn_pane(&id, idx);
-        self.focus = Focus::Terminal;
+        });
+        tab.first_args = first_args;
+        let rt = self.rt_for(issue);
+        rt.tabs.push(tab);
+        let idx = rt.tabs.len() - 1;
+        if activate {
+            rt.active = idx;
+        }
+        self.persist(issue);
+        self.spawn_pane(issue, idx);
+        tab_id
+    }
+
+    /// Open tabs asked for with `office tab new`, in the background.
+    fn poll_requests(&mut self) {
+        for (id, req) in api::take_requests() {
+            let reply = match req {
+                Ok(req) => self.open_requested(req),
+                Err(e) => Reply::err(format!("{e:#}")),
+            };
+            api::reply(&id, &reply);
+        }
+    }
+
+    fn open_requested(&mut self, req: Request) -> Reply {
+        if let Err(e) = req.check() {
+            return Reply::err(format!("{e:#}"));
+        }
+        if !self.notes.iter().any(|n| n.id == req.issue) {
+            return Reply::err(format!("no issue {}", req.issue));
+        }
+        let args = if req.kind == TabKind::Claude { req.claude_args() } else { vec![] };
+        let tab = self.add_tab(&req.issue, req.kind, req.name.clone(), req.cwd.clone(), args, false);
+        let rt = self.rt_for(&req.issue);
+        // A tab waiting for its worktree starts once it exists.
+        let waiting = rt.creating.as_ref().is_some_and(|j| j.waiting.contains(&tab));
+        let Some(t) = rt.tabs.iter().find(|t| t.st.id == tab) else {
+            return Reply::err("tab closed");
+        };
+        if t.pane.is_none() && !waiting {
+            return Reply::err("tab didn't start, see office");
+        }
+        let name = t.st.name.clone();
+        self.flash(format!("New tab \"{name}\" in {}", req.issue));
+        Reply::ok(tab)
     }
 
     /// Starting a Claude session on a To-do issue moves it to Active. Runs
@@ -1012,6 +1076,7 @@ impl App {
             return;
         }
         self.last_status = Instant::now();
+        self.poll_requests();
         let selected = self.selected.clone();
         let mut new_sessions: Vec<(String, String, String)> = vec![];
         let mut renamed: Vec<String> = vec![];

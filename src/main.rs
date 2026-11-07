@@ -1,4 +1,5 @@
 #![allow(clippy::collapsible_if)]
+mod api;
 mod app;
 mod clipboard;
 mod complete;
@@ -13,7 +14,7 @@ mod ui;
 mod vault;
 mod worktree;
 
-use anyhow::Result;
+use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
 use crossterm::event::{
     DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
@@ -42,7 +43,47 @@ enum Cmd {
     List,
     /// Print config, data and notes paths.
     Paths,
+    /// Work with tabs of the running office.
+    Tab {
+        #[command(subcommand)]
+        cmd: TabCmd,
+    },
+    /// Install the /new-office-tab Claude Code skill into ~/.claude/skills.
+    InstallSkill,
 }
+
+#[derive(Subcommand)]
+enum TabCmd {
+    /// Open a tab in an issue of the running office, in the background.
+    New {
+        /// Issue id; defaults to $OFFICE_ISSUE (set inside office tabs).
+        #[arg(long)]
+        issue: Option<String>,
+        #[arg(long, value_enum, default_value = "claude")]
+        kind: TabKindArg,
+        /// Directory to start in; defaults to the issue's worktree.
+        #[arg(long)]
+        cwd: Option<std::path::PathBuf>,
+        /// Tab name (and Claude session name).
+        #[arg(long)]
+        name: Option<String>,
+        /// Claude permission mode: plan, auto, acceptEdits, manual, dontAsk, bypassPermissions.
+        #[arg(long)]
+        mode: Option<String>,
+        /// File whose text is Claude's first prompt.
+        #[arg(long)]
+        prompt_file: Option<std::path::PathBuf>,
+    },
+}
+
+#[derive(Clone, Copy, clap::ValueEnum)]
+enum TabKindArg {
+    Claude,
+    Shell,
+    Notes,
+}
+
+const SKILL: &str = include_str!("../skills/new-office-tab/SKILL.md");
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
@@ -102,6 +143,36 @@ fn main() -> Result<()> {
             println!("data    {}", config::data_dir().display());
             println!("notes   {}", cfg.notes_root().display());
             println!("worktrees {}", cfg.worktrees_dir.display());
+            Ok(())
+        }
+        Some(Cmd::Tab { cmd: TabCmd::New { issue, kind, cwd, name, mode, prompt_file } }) => {
+            let issue = issue
+                .or_else(|| std::env::var("OFFICE_ISSUE").ok())
+                .context("not inside an office tab: pass --issue")?;
+            let cwd = cwd
+                .map(|d| std::fs::canonicalize(config::expand(&d)).with_context(|| format!("not a directory: {}", d.display())))
+                .transpose()?;
+            let prompt = prompt_file
+                .map(|f| std::fs::read_to_string(&f).with_context(|| format!("reading {}", f.display())))
+                .transpose()?;
+            let kind = match kind {
+                TabKindArg::Claude => state::TabKind::Claude,
+                TabKindArg::Shell => state::TabKind::Shell,
+                TabKindArg::Notes => state::TabKind::Notes,
+            };
+            let req = api::Request { issue: issue.clone(), kind, cwd, name, mode, prompt };
+            let reply = api::submit(&req)?;
+            if !reply.ok {
+                bail!("{}", reply.error.unwrap_or_else(|| "failed".into()));
+            }
+            println!("tab:{} issue:{issue}", reply.tab.unwrap_or_default());
+            Ok(())
+        }
+        Some(Cmd::InstallSkill) => {
+            let p = status::claude_dir().join("skills").join("new-office-tab").join("SKILL.md");
+            std::fs::create_dir_all(p.parent().unwrap())?;
+            std::fs::write(&p, SKILL)?;
+            println!("Skill written to {}", p.display());
             Ok(())
         }
         None => run_tui(),
