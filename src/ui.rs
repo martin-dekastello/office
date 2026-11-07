@@ -134,9 +134,12 @@ fn draw_sidebar(app: &mut App, f: &mut Frame, area: Rect) {
     app.quit_hit = Rect { x: head.right() - quit_w, width: quit_w, ..head };
     f.render_widget(Paragraph::new(Span::styled(" quit ", Style::new().fg(FG_DIM))), app.quit_hit);
 
-    let mut st = vec![Span::raw(" ")];
+    let full: usize = Stage::ALL.iter().map(|s| s.label().len() + app.count(*s).to_string().len() + 3).sum();
+    let short = full + 1 > stages.width as usize;
+    let mut st = vec![Span::raw(if short { "" } else { " " })];
     for s in Stage::ALL {
-        let label = format!(" {} {} ", s.label(), app.count(s));
+        let name = if short { s.short() } else { s.label() };
+        let label = format!(" {} {} ", name, app.count(s));
         let style = if s == app.view {
             Style::new().fg(Color::Black).bg(FG).add_modifier(Modifier::BOLD)
         } else {
@@ -159,7 +162,8 @@ fn draw_sidebar(app: &mut App, f: &mut Frame, area: Rect) {
     let w = list.width as usize;
     if notes.is_empty() {
         let hint = match app.view {
-            Stage::Active => " No active issues.\n n  new local issue\n S  sync GitHub/Jira",
+            Stage::Todo => " Nothing to do.\n n  new local issue\n S  sync GitHub/Jira",
+            Stage::Active => " Nothing in progress.\n c  on a To-do issue starts it\n u  move an issue here",
             _ => " Empty.",
         };
         f.render_widget(Paragraph::new(hint).style(Style::new().fg(FG_DIM)), list);
@@ -455,7 +459,7 @@ fn draw_help(app: &App, f: &mut Frame, area: Rect) {
         ("Sidebar (focused)".into(), ""),
         ("j/k ↑/↓".into(), "select issue"),
         ("⏎ / l".into(), "open issue (start/resume active tab)"),
-        ("1/2/3, h/v".into(), "view Active / Done / Archive"),
+        ("0/1/2/3, h/v".into(), "view To-do / Active / Done / Archive"),
         ("Tab / Esc".into(), "back to terminal"),
         ("x / q".into(), "close tab / quit"),
         ("".into(), ""),
@@ -469,7 +473,7 @@ fn draw_help(app: &App, f: &mut Frame, area: Rect) {
         ("x  ,".into(), "close tab, rename tab"),
         ("z / R".into(), "suspend Claude tab / reopen closed tab"),
         ("o / w".into(), "open note in Obsidian / issue in browser"),
-        ("d / a / u".into(), "move issue to done / archive / active"),
+        ("d / a / u / T".into(), "move issue to done / archive / active / to-do"),
         ("n".into(), "new local issue"),
         ("S / r".into(), "sync GitHub/Jira"),
         ("[ / ]".into(), "scroll the tab back / forward (also mouse wheel)"),
