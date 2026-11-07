@@ -3,15 +3,15 @@
 Issues on the left, Claude Code tabs on the right, one Obsidian note per issue.
 
 ```
- office  ● 1                     │ ✳ 1:Refactor tile cache   ● 2:Fix loader   $ 3:shell
-  Active 3  Done 1  Archive 0    │
-                                 │  (live Claude Code session for the selected issue)
- ✳ TS-42                      3▤ │
-   Přidat mapu dlaždic pro fotky │
- ● PROJ-118                   1▤ │
-   Fix OAuth login loop          │
-   LOCAL-3                       │
-   Session naming request        │
+ office  ● 1                            │ ✳ 1:Refactor tile cache   ● 2:Fix loader   $ 3:shell
+  To-do 5  Active 3  Done 1  Archive 0  │
+                                        │  (live Claude Code session for the selected issue)
+ ✳ TS-42                             3▤ │
+   Přidat mapu dlaždic pro fotky        │
+ ● PROJ-118                          1▤ │
+   Fix OAuth login loop                 │
+   LOCAL-3                              │
+   Session naming request               │
 ```
 
 - **Sorted by issue.** Each issue has its own tabs: Claude sessions, shells, and a note editor.
@@ -20,8 +20,11 @@ Issues on the left, Claude Code tabs on the right, one Obsidian note per issue.
   `●` green = finished while you weren't looking · `○` idle · `✕` exited · `–` suspended.
   The status of the most urgent tab also shows on the issue in the sidebar.
   The terminal bell rings when a background tab needs you.
-- **Notes live in Obsidian**: `<vault>/<notes_dir>/{active,done,archive}/<id>-<slug>.md`, one
-  file per issue. Moving an issue to done/archive moves the file and updates `status:`.
+- **Notes live in Obsidian**: `<vault>/<notes_dir>/{todo,active,done,archive}/<id>-<slug>.md`,
+  one file per issue. Moving an issue to another stage moves the file and updates `status:`.
+- **To-do vs Active.** New issues, synced or local, land in To-do. Active is what you're working
+  on: move an issue there with `u`, or start a Claude session on a To-do issue and it moves
+  there itself. Office never moves an issue because its GitHub or Jira status changed.
   Each new Claude session is logged under `## Sessions` with its `claude --resume <id>` command.
 - **One git worktree + branch per issue** (`<worktrees_dir>/<repo>/<id>-<slug>`), so all
   tabs of an issue share one checkout.
@@ -91,13 +94,13 @@ to the terminal.
 |---|---|
 | `j`/`k` | select issue |
 | `⏎` | open issue: start or resume its active tab |
-| `1` `2` `3` / `h` | view Active / Done / Archive |
+| `0` `1` `2` `3` / `h` | view To-do / Active / Done / Archive |
 | `c` `t` `e` | new Claude / shell / note-editor tab |
 | `z` / `R` | suspend Claude tab / reopen closed Claude tab |
 | `C` | new Claude tab in a directory you type (`Tab` completes, empty = issue default) |
 | `p` | set the default directory for issues with no repo (`Tab` completes, empty = keep) |
 | `o` / `w` | open note in Obsidian / issue in browser |
-| `d` `a` `u` | move to done / archive / active |
+| `d` `a` `u` `T` | move to done / archive / active / to-do |
 | `n` | new local issue |
 | `S` | sync GitHub/Jira |
 | `x` / `q` | close tab / quit |
@@ -107,7 +110,7 @@ to the terminal.
 | `s` / `Tab` | toggle focus between sidebar and terminal |
 | `1`–`9`, `h`/`l` | go to tab, previous/next tab |
 | `j` / `k` | next/previous issue |
-| `c` `C` `p` `t` `e` `z` `R` `o` `d` `a` `n` `S` | same as in the sidebar |
+| `c` `C` `p` `t` `e` `z` `R` `o` `d` `a` `u` `T` `n` `S` | same as in the sidebar |
 | `x`, `,` | close tab, rename tab |
 | `[` `]` | scroll the tab back/forward (the mouse wheel works too) |
 | `?`, `q` | help, quit |
@@ -147,7 +150,7 @@ Claude "append a summary to $OFFICE_NOTE".
 ```
 office                 # TUI
 office new <title>     # create a local issue note
-office sync            # pull GitHub/Jira issues and create missing notes
+office sync            # pull GitHub/Jira issues and create missing notes in todo/
 office list
 office install-hooks
 ```
@@ -161,7 +164,7 @@ src/
   term.rs       PTY + vt100 pane (portable-pty, tui-term)
   keys.rs       key event -> terminal bytes
   clipboard.rs  copy to the system clipboard and OSC 52
-  vault.rs      Obsidian notes (active/done/archive), slugs, frontmatter
+  vault.rs      Obsidian notes (todo/active/done/archive), slugs, frontmatter
   providers.rs  GitHub (gh), Jira REST v3
   status.rs     Claude Code hook handler and settings
   worktree.rs   per-issue git worktrees

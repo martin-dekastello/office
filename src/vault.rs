@@ -1,5 +1,5 @@
 //! Obsidian-compatible notes: one markdown file per issue in
-//! <vault>/<notes_dir>/{active,done,archive}/<id>-<slug>.md
+//! <vault>/<notes_dir>/{todo,active,done,archive}/<id>-<slug>.md
 //! The vault is the source of truth for the issue list.
 
 use anyhow::{bail, Context, Result};
@@ -9,16 +9,18 @@ use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Stage {
+    Todo,
     Active,
     Done,
     Archive,
 }
 
 impl Stage {
-    pub const ALL: [Stage; 3] = [Stage::Active, Stage::Done, Stage::Archive];
+    pub const ALL: [Stage; 4] = [Stage::Todo, Stage::Active, Stage::Done, Stage::Archive];
 
     pub fn dir(self) -> &'static str {
         match self {
+            Stage::Todo => "todo",
             Stage::Active => "active",
             Stage::Done => "done",
             Stage::Archive => "archive",
@@ -27,9 +29,20 @@ impl Stage {
 
     pub fn label(self) -> &'static str {
         match self {
+            Stage::Todo => "To-do",
             Stage::Active => "Active",
             Stage::Done => "Done",
             Stage::Archive => "Archive",
+        }
+    }
+
+    /// For the stage bar when the full labels don't fit.
+    pub fn short(self) -> &'static str {
+        match self {
+            Stage::Todo => "Todo",
+            Stage::Active => "Act",
+            Stage::Done => "Done",
+            Stage::Archive => "Arc",
         }
     }
 }
@@ -64,6 +77,7 @@ pub struct NewNote<'a> {
     pub source: &'a str,
     pub url: Option<&'a str>,
     pub repo: Option<&'a str>,
+    pub stage: Stage,
 }
 
 /// ASCII-folds (ř -> r, ž -> z), lowercases, and joins words with '-'.
@@ -256,21 +270,22 @@ impl Vault {
         self.scan().into_iter().find(|n| n.id == id)
     }
 
-    /// Create the note in active/ unless a note with this id exists in any folder.
+    /// Create the note in its stage's folder unless a note with this id exists in any folder.
     pub fn create(&self, n: NewNote) -> Result<(Note, bool)> {
         if let Some(existing) = self.find(n.id) {
             return Ok((existing, false));
         }
         let stem = file_stem(n.id, n.title);
-        let path = self.root.join(Stage::Active.dir()).join(format!("{stem}.md"));
+        let path = self.root.join(n.stage.dir()).join(format!("{stem}.md"));
         if path.exists() {
             bail!("{} already exists", path.display());
         }
         let today = chrono::Local::now().format("%Y-%m-%d").to_string();
         let mut fm = format!(
-            "---\nid: {}\ntitle: {}\nstatus: active\nsource: {}\n",
+            "---\nid: {}\ntitle: {}\nstatus: {}\nsource: {}\n",
             yaml_str(n.id),
             yaml_str(n.title),
+            n.stage.dir(),
             n.source
         );
         if let Some(u) = n.url {
@@ -290,7 +305,7 @@ impl Vault {
         );
         fs::write(&path, fm + &body)?;
         let note = self
-            .read_note(&path, Stage::Active)
+            .read_note(&path, n.stage)
             .context("reading back new note")?;
         Ok((note, true))
     }
@@ -370,14 +385,18 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("office-test-{}", uuid::Uuid::new_v4()));
         let v = Vault::new(dir.clone()).unwrap();
         let (n, created) = v
-            .create(NewNote { id: "GH-7", title: "Mapa dlaždic", source: "github", url: Some("https://x"), repo: Some("o/r") })
+            .create(NewNote { id: "GH-7", title: "Mapa dlaždic", source: "github", url: Some("https://x"), repo: Some("o/r"), stage: Stage::Todo })
             .unwrap();
         assert!(created);
-        assert!(n.path.ends_with("active/GH-7-mapa-dlazdic.md"));
+        assert!(n.path.ends_with("todo/GH-7-mapa-dlazdic.md"));
+        assert!(fs::read_to_string(&n.path).unwrap().contains("status: todo"));
         let (_, again) = v
-            .create(NewNote { id: "GH-7", title: "other", source: "github", url: None, repo: None })
+            .create(NewNote { id: "GH-7", title: "other", source: "github", url: None, repo: None, stage: Stage::Active })
             .unwrap();
         assert!(!again);
+        assert_eq!(v.find("GH-7").unwrap().stage, Stage::Todo);
+        let n = v.move_to(&n, Stage::Active).unwrap();
+        assert!(n.path.ends_with("active/GH-7-mapa-dlazdic.md"));
         let d = v.move_to(&n, Stage::Done).unwrap();
         assert!(d.path.ends_with("done/GH-7-mapa-dlazdic.md"));
         assert_eq!(v.find("GH-7").unwrap().stage, Stage::Done);

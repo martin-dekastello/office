@@ -1,5 +1,5 @@
 //! Pluggable issue sources. Each provider returns open issues; syncing
-//! creates a note in active/ for any issue that has no note yet.
+//! creates a note in todo/ for any issue that has no note yet.
 
 use crate::config::{Config, GithubSource, JiraSource};
 use anyhow::{bail, Context, Result};

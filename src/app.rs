@@ -288,6 +288,8 @@ impl App {
         };
         if let Some(n) = app.selected_note() {
             app.view = n.stage;
+        } else if app.count(Stage::Active) == 0 {
+            app.view = Stage::Todo;
         }
         if app.selected.is_none() {
             app.selected = app.visible().first().map(|n| n.id.clone());
@@ -406,10 +408,10 @@ impl App {
             return;
         }
         let id = self.vault.next_local_id(&self.cfg.local_prefix);
-        match self.vault.create(NewNote { id: &id, title: &title, source: "local", url: None, repo: None }) {
+        match self.vault.create(NewNote { id: &id, title: &title, source: "local", url: None, repo: None, stage: Stage::Todo }) {
             Ok((n, _)) => {
                 self.rescan();
-                self.view = Stage::Active;
+                self.view = Stage::Todo;
                 self.select_id(n.id.clone());
                 self.flash(format!("Created {}", n.path.display()));
             }
@@ -459,6 +461,7 @@ impl App {
                 source: i.source,
                 url: i.url.as_deref(),
                 repo: i.repo.as_deref(),
+                stage: Stage::Todo,
             });
             if matches!(r, Ok((_, true))) {
                 created += 1;
@@ -621,6 +624,9 @@ impl App {
             self.flash("Select an issue first".into());
             return;
         };
+        if kind == TabKind::Claude {
+            self.start_work(&id);
+        }
         let name = match kind {
             TabKind::Claude => "claude",
             TabKind::Shell => "shell",
@@ -640,6 +646,22 @@ impl App {
         self.persist(&id);
         self.spawn_pane(&id, idx);
         self.focus = Focus::Terminal;
+    }
+
+    /// Starting a Claude session on a To-do issue moves it to Active. Runs
+    /// before the pane spawns so OFFICE_NOTE points at the moved file.
+    fn start_work(&mut self, id: &str) {
+        let Some(note) = self.selected_note().filter(|n| n.id == id && n.stage == Stage::Todo).cloned() else {
+            return;
+        };
+        match self.vault.move_to(&note, Stage::Active) {
+            Ok(_) => {
+                self.rescan();
+                self.view = Stage::Active;
+                self.flash(format!("{} → {}", note.id, Stage::Active.label()));
+            }
+            Err(e) => self.flash(format!("Move failed: {e:#}")),
+        }
     }
 
     /// Start a Claude tab in a typed directory; empty means the issue's default.
@@ -1296,14 +1318,16 @@ impl App {
             KeyCode::Char('g') | KeyCode::Home => self.move_selection(-10_000),
             KeyCode::Char('G') | KeyCode::End => self.move_selection(10_000),
             KeyCode::Enter | KeyCode::Char('l') | KeyCode::Right => self.open_issue(),
+            KeyCode::Char('0') => self.set_view(Stage::Todo),
             KeyCode::Char('1') => self.set_view(Stage::Active),
             KeyCode::Char('2') => self.set_view(Stage::Done),
             KeyCode::Char('3') => self.set_view(Stage::Archive),
             KeyCode::Char('v') | KeyCode::Char('h') | KeyCode::Left => {
                 let next = match self.view {
+                    Stage::Todo => Stage::Active,
                     Stage::Active => Stage::Done,
                     Stage::Done => Stage::Archive,
-                    Stage::Archive => Stage::Active,
+                    Stage::Archive => Stage::Todo,
                 };
                 self.set_view(next);
             }
@@ -1346,6 +1370,7 @@ impl App {
             KeyCode::Char('d') => self.move_stage(Stage::Done),
             KeyCode::Char('a') => self.move_stage(Stage::Archive),
             KeyCode::Char('u') => self.move_stage(Stage::Active),
+            KeyCode::Char('T') => self.move_stage(Stage::Todo),
             KeyCode::Char('S') | KeyCode::Char('r') => {
                 if providers::from_config(&self.cfg).is_empty() {
                     self.flash("No [[github]] or [[jira]] sources in config".into());

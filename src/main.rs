@@ -61,7 +61,7 @@ fn main() -> Result<()> {
             let v = vault::Vault::new(cfg.notes_root())?;
             let id = v.next_local_id(&cfg.local_prefix);
             let title = title.join(" ");
-            let (n, _) = v.create(vault::NewNote { id: &id, title: &title, source: "local", url: None, repo: None })?;
+            let (n, _) = v.create(vault::NewNote { id: &id, title: &title, source: "local", url: None, repo: None, stage: vault::Stage::Todo })?;
             println!("{}", n.path.display());
             Ok(())
         }
@@ -76,6 +76,7 @@ fn main() -> Result<()> {
                     source: i.source,
                     url: i.url.as_deref(),
                     repo: i.repo.as_deref(),
+                    stage: vault::Stage::Todo,
                 })?;
                 if created {
                     println!("+ {}", n.path.display());
