@@ -139,8 +139,28 @@ install globally. If you'd rather not use `--settings`, set `inject_hooks = fals
 `office install-hooks`. That merges the hooks into `~/.claude/settings.json` and writes
 a backup first.
 
-Every tab also gets `OFFICE_ISSUE` and `OFFICE_NOTE` (the note's path). You can tell
-Claude "append a summary to $OFFICE_NOTE".
+Every tab also gets `OFFICE_ISSUE`, `OFFICE_NOTE` (the note's path) and `OFFICE_BIN` (the
+office executable). You can tell Claude "append a summary to $OFFICE_NOTE".
+
+## Opening tabs from Claude
+
+`office tab new` opens a tab in an issue of the running office. The tab opens in the
+background, so whatever you're looking at stays on screen. Inside a tab, the issue defaults
+to `$OFFICE_ISSUE`:
+
+```sh
+office tab new --mode plan --name probe --cwd ~/code/other --prompt-file brief.md
+office tab new --kind shell
+```
+
+`--mode` and `--prompt-file` apply only to the first launch. A suspended or restarted tab
+resumes its session as usual and never gets the prompt again. The command waits up to 5s
+for office to answer and fails if office isn't running.
+
+`office install-skill` adds the `/new-office-tab` skill to `~/.claude/skills` (or
+`$CLAUDE_CONFIG_DIR`). In a Claude tab, `/new-office-tab plan <task>` writes a handoff brief
+from the conversation and opens a new Claude tab in the same issue, started in that mode
+with the brief as its first prompt. It's like `/new-claude-tmux`, but without tmux.
 
 ## CLI
 
@@ -150,6 +170,9 @@ office new <title>     # create a local issue note
 office sync            # pull GitHub/Jira issues and create missing notes
 office list
 office install-hooks
+office tab new [--issue ID] [--kind claude|shell|notes] [--cwd DIR] [--name NAME]
+               [--mode MODE] [--prompt-file FILE]   # open a tab in the running office
+office install-skill   # add /new-office-tab to ~/.claude/skills
 ```
 
 ## Layout
@@ -164,6 +187,7 @@ src/
   vault.rs      Obsidian notes (active/done/archive), slugs, frontmatter
   providers.rs  GitHub (gh), Jira REST v3
   status.rs     Claude Code hook handler and settings
+  api.rs        `office tab new` requests to the running UI
   worktree.rs   per-issue git worktrees
   state.rs      persisted tabs, session IDs and saved screens
   transcript.rs conversation text from Claude's transcript, for saved screens

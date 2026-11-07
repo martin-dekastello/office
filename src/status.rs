@@ -188,11 +188,15 @@ pub fn write_settings_file() -> Result<PathBuf> {
     Ok(path)
 }
 
-fn claude_settings_path() -> PathBuf {
-    let base = std::env::var("CLAUDE_CONFIG_DIR")
+/// Claude Code's user folder: $CLAUDE_CONFIG_DIR or ~/.claude.
+pub fn claude_dir() -> PathBuf {
+    std::env::var("CLAUDE_CONFIG_DIR")
         .map(PathBuf::from)
-        .unwrap_or_else(|_| dirs::home_dir().unwrap_or_default().join(".claude"));
-    base.join("settings.json")
+        .unwrap_or_else(|_| dirs::home_dir().unwrap_or_default().join(".claude"))
+}
+
+fn claude_settings_path() -> PathBuf {
+    claude_dir().join("settings.json")
 }
 
 /// `office install-hooks`: merge hooks into ~/.claude/settings.json
