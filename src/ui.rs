@@ -140,9 +140,14 @@ fn draw_sidebar(app: &mut App, f: &mut Frame, area: Rect) {
     let full: usize = Stage::ALL.iter().map(|s| s.label().len() + app.count(*s).to_string().len() + 3).sum();
     let short = full + 1 > stages.width as usize;
     let mut st = vec![Span::raw(if short { "" } else { " " })];
+    let mut x = stages.x + u16::from(!short);
+    app.stage_hits.clear();
     for s in Stage::ALL {
         let name = if short { s.short() } else { s.label() };
         let label = format!(" {} {} ", name, app.count(s));
+        let w = label.chars().count() as u16;
+        app.stage_hits.push((Rect { x, y: stages.y, width: w, height: 1 }.intersection(stages), s));
+        x = x.saturating_add(w);
         let style = if s == app.view {
             Style::new().fg(Color::Black).bg(FG).add_modifier(Modifier::BOLD)
         } else {

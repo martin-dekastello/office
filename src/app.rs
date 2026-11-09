@@ -247,6 +247,7 @@ pub struct App {
     /// The shell tab being selected in, and where the mouse last was.
     pane_select: Option<(String, Position)>,
     pub item_hits: Vec<(Rect, String)>,
+    pub stage_hits: Vec<(Rect, Stage)>,
     last_scan: Instant,
     last_status: Instant,
     last_spin: Instant,
@@ -313,6 +314,7 @@ impl App {
             pane_drag: false,
             pane_select: None,
             item_hits: vec![],
+            stage_hits: vec![],
             last_scan: Instant::now(),
             last_status: Instant::now(),
             last_spin: Instant::now(),
@@ -1320,6 +1322,9 @@ impl App {
                 } else if let Some((_, i)) = self.tab_hits.iter().find(|(r, _)| r.contains(pos)).cloned() {
                     self.switch_tab(i);
                     self.view_tab();
+                } else if let Some((_, s)) = self.stage_hits.iter().find(|(r, _)| r.contains(pos)).cloned() {
+                    self.set_view(s);
+                    self.focus = Focus::Sidebar;
                 } else if let Some((_, id)) = self.item_hits.iter().find(|(r, _)| r.contains(pos)).cloned() {
                     self.select_id(id);
                     self.focus = Focus::Sidebar;
