@@ -27,3 +27,4 @@ vt100 = "0.16"
 
 [target."cfg(unix)".dependencies]
 libc = "0.2.191"
+signal-hook = "0.3.18"

@@ -66,6 +66,9 @@ pub struct Config {
     pub theme: String,
     pub github: Vec<GithubSource>,
     pub jira: Vec<JiraSource>,
+    /// What the folder's `.office/config.toml` tried to set but may not.
+    #[serde(skip)]
+    pub ignored: Vec<String>,
 }
 
 impl Default for Config {
@@ -95,12 +98,15 @@ impl Default for Config {
             theme: "auto".into(),
             github: vec![],
             jira: vec![],
+            ignored: vec![],
         }
     }
 }
 
 const TEMPLATE: &str = r#"# office configuration
-# <folder>/.office/config.toml overrides any of these for `office <folder>`.
+# <folder>/.office/config.toml can override vault, notes_dir, prefix, local_prefix,
+# bell, mouse and [[github]] (without path) for `office <folder>`. Commands, repo
+# paths and Jira only come from here: a repo can ship its own .office/config.toml.
 
 # Obsidian vault root and the folder inside it that holds active/ done/ archive/
 vault = "{VAULT}"
@@ -226,16 +232,21 @@ impl Config {
             .with_context(|| format!("reading {}", path.display()))?;
         let mut table: toml::Table =
             toml::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
+        let mut ignored = vec![];
+        let mut sources = path.display().to_string();
         if let Some(over) = instance_dir.map(|d| d.join("config.toml")).filter(|p| p.exists()) {
-            let text = std::fs::read_to_string(&over)
-                .with_context(|| format!("reading {}", over.display()))?;
-            let t: toml::Table =
-                toml::from_str(&text).with_context(|| format!("parsing {}", over.display()))?;
+            let (t, dropped) = folder_overlay(&over)?;
+            if !dropped.is_empty() {
+                eprintln!("ignored in {}: {}", over.display(), dropped.join(", "));
+            }
+            ignored = dropped;
             merge(&mut table, t);
+            sources = format!("{sources} with {}", over.display());
         }
         let mut cfg: Config = toml::Value::Table(table)
             .try_into()
-            .with_context(|| format!("parsing {}", path.display()))?;
+            .with_context(|| format!("parsing {sources}"))?;
+        cfg.ignored = ignored;
         cfg.vault = expand(&cfg.vault);
         cfg.worktrees_dir = expand(&cfg.worktrees_dir);
         cfg.local_repo = cfg.local_repo.as_deref().map(expand);
@@ -301,6 +312,35 @@ impl Config {
     }
 }
 
+/// What a folder's own config may set. A cloned repo can ship
+/// `.office/config.toml`, so nothing that runs commands or sends credentials:
+/// no `*_command`, no repo paths (worktrees run their hooks), no Jira.
+const FOLDER_KEYS: &[&str] = &["vault", "notes_dir", "prefix", "local_prefix", "bell", "mouse", "github"];
+
+/// A folder's `.office/config.toml`, cut down to `FOLDER_KEYS`, and the keys it lost.
+fn folder_overlay(path: &Path) -> Result<(toml::Table, Vec<String>)> {
+    let text = std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+    let table: toml::Table =
+        toml::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
+    let mut dropped = vec![];
+    let mut kept = toml::Table::new();
+    for (k, mut v) in table {
+        if !FOLDER_KEYS.contains(&k.as_str()) {
+            dropped.push(k);
+            continue;
+        }
+        if k == "github" {
+            for g in v.as_array_mut().into_iter().flatten().filter_map(|g| g.as_table_mut()) {
+                if g.remove("path").is_some() && !dropped.iter().any(|d| d == "github.path") {
+                    dropped.push("github.path".into());
+                }
+            }
+        }
+        kept.insert(k, v);
+    }
+    Ok((kept, dropped))
+}
+
 /// Put `over` on top of `base`: tables merge key by key, anything else
 /// (including arrays like `[[github]]`) replaces what was there.
 fn merge(base: &mut toml::Table, over: toml::Table) {
@@ -356,5 +396,38 @@ mod tests {
         assert_eq!(gh[0]["repo"].as_str(), Some("b/three"));
         assert_eq!(base["extra"]["x"].as_integer(), Some(1));
         assert_eq!(base["extra"]["y"].as_integer(), Some(3));
+    }
+
+    #[test]
+    fn a_folder_config_cannot_run_commands() {
+        let dir = std::env::temp_dir().join(format!("office-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let over = dir.join("config.toml");
+        std::fs::write(
+            &over,
+            r#"
+            vault = "/team"
+            claude_command = ["sh", "-c", "echo pwned"]
+            shell_command = ["sh"]
+            worktree_command = ["sh"]
+            local_repo = "/evil.git"
+            [[github]]
+            repo = "a/one"
+            path = "/evil.git"
+            [[jira]]
+            url = "https://evil.example"
+            email = "x"
+            "#,
+        )
+        .unwrap();
+        let (t, dropped) = folder_overlay(&over).unwrap();
+        assert_eq!(t["vault"].as_str(), Some("/team"));
+        assert_eq!(t["github"][0]["repo"].as_str(), Some("a/one"));
+        assert!(t["github"][0].get("path").is_none());
+        for k in ["claude_command", "shell_command", "worktree_command", "local_repo", "jira", "github.path"] {
+            assert!(dropped.iter().any(|d| d == k), "{k} not dropped: {dropped:?}");
+            assert!(!t.contains_key(k));
+        }
+        std::fs::remove_dir_all(dir).ok();
     }
 }

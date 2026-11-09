@@ -93,6 +93,31 @@ impl Instance {
         }
     }
 
+    /// Refuse a socket that isn't this office's: a symlink, or in the `/tmp`
+    /// fallback one owned by someone other than the owner of `.office`. That
+    /// name is one anyone can work out, so another user could bind it first
+    /// and collect the keys a client sends. Inside `.office` only those who
+    /// may write there can make one, and they could change the state anyway.
+    #[cfg(unix)]
+    pub fn check_socket(&self) -> Result<()> {
+        use std::os::unix::fs::MetadataExt;
+        let sock = self.socket_path();
+        let Ok(meta) = std::fs::symlink_metadata(&sock) else { return Ok(()) };
+        if meta.file_type().is_symlink() {
+            bail!("{} is a symlink, not office's socket", sock.display());
+        }
+        if sock.starts_with(&self.dir) {
+            return Ok(());
+        }
+        let owner = std::fs::metadata(&self.dir)
+            .with_context(|| format!("reading {}", self.dir.display()))?
+            .uid();
+        if meta.uid() != owner {
+            bail!("{} belongs to another user, not to the owner of {}", sock.display(), self.dir.display());
+        }
+        Ok(())
+    }
+
     #[cfg(unix)]
     pub fn socket_name(&self) -> std::io::Result<Name<'static>> {
         use interprocess::local_socket::{GenericFilePath, ToFsName};
@@ -106,14 +131,22 @@ impl Instance {
         format!("office-{}.sock", hash(&self.folder)).to_ns_name::<GenericNamespaced>().map(|n| n.into_owned())
     }
 
-    /// Held by the server while it runs, so a folder never gets two.
+    pub fn lock_path(&self) -> PathBuf {
+        self.dir.join("server.lock")
+    }
+
+    /// Held by the server while it runs, so a folder never gets two. It holds
+    /// the server's pid, so `kill $(cat .office/server.lock)` stops it cleanly.
     pub fn lock(&self) -> Result<File> {
-        let path = self.dir.join("server.lock");
-        let f = File::options().create(true).truncate(false).write(true).open(&path)
+        use std::io::Write;
+        let path = self.lock_path();
+        let mut f = File::options().create(true).truncate(false).write(true).open(&path)
             .with_context(|| format!("opening {}", path.display()))?;
         if f.try_lock().is_err() {
             bail!("office is already running in {}", self.folder.display());
         }
+        f.set_len(0)?;
+        writeln!(f, "{}", std::process::id())?;
         Ok(f)
     }
 }
@@ -129,7 +162,8 @@ pub fn migrate(global: &Path, dir: &Path) -> Result<bool> {
         return Ok(false);
     }
     std::fs::create_dir_all(dir)?;
-    for name in ["state.json", "snapshots", "status"] {
+    // state.json last: while it is still here, a failed move is tried again.
+    for name in ["snapshots", "status", "state.json"] {
         let from = global.join(name);
         if from.exists() {
             let to = dir.join(name);
@@ -196,6 +230,7 @@ mod tests {
         let i = Instance::new(Some(&root)).unwrap();
         i.ensure_dir().unwrap();
         let held = i.lock().unwrap();
+        assert_eq!(std::fs::read_to_string(i.lock_path()).unwrap().trim(), std::process::id().to_string());
         assert!(i.lock().unwrap_err().to_string().contains("already running"));
         drop(held);
         assert!(i.lock().is_ok());
@@ -211,6 +246,26 @@ mod tests {
         let p = long.socket_path();
         assert!(p.starts_with("/tmp") && p.as_os_str().len() <= MAX_SOCKET_PATH);
         assert_eq!(p, Instance::at(long.folder.clone()).socket_path());
+    }
+
+    // Another user's socket can't be made here without root; a symlink stands
+    // in for a socket that isn't ours.
+    #[cfg(unix)]
+    #[test]
+    fn only_our_own_socket_is_trusted() {
+        let root = temp();
+        let i = Instance::new(Some(&root)).unwrap();
+        i.ensure_dir().unwrap();
+        assert!(i.check_socket().is_ok(), "no socket yet is fine");
+        let sock = std::os::unix::net::UnixListener::bind(i.socket_path()).unwrap();
+        assert!(i.check_socket().is_ok());
+        drop(sock);
+        std::fs::remove_file(i.socket_path()).unwrap();
+        std::os::unix::fs::symlink("/tmp/elsewhere.sock", i.socket_path()).unwrap();
+        assert!(i.check_socket().unwrap_err().to_string().contains("symlink"));
+        // macOS's long $TMPDIR puts this socket in /tmp, outside root.
+        std::fs::remove_file(i.socket_path()).ok();
+        std::fs::remove_dir_all(root).ok();
     }
 
     #[test]

@@ -79,8 +79,11 @@ Requirements: `claude` on PATH, `git` for worktrees, `gh` (logged in) for GitHub
 
 `~/.config/office/config.toml` on Linux, `~/Library/Application Support/office/config.toml`
 on macOS, `%APPDATA%\office\config.toml` on Windows. Override with `$OFFICE_CONFIG`.
-A folder's `.office/config.toml` overrides any of it for that folder's office. For example,
-give a team folder its own vault and sources.
+A folder's `.office/config.toml` overrides some of it for that folder's office: `vault`,
+`notes_dir`, `prefix`, `local_prefix`, `bell`, `mouse` and `[[github]]` sources (without
+`path`). For example, give a team folder its own vault and sources. Commands, repo paths and
+Jira only come from your own config, because a repo you clone can ship a `.office/config.toml`.
+office ignores the rest and says so when it starts.
 
 ```toml
 vault = "~/Documents/Obsidian"
@@ -270,7 +273,10 @@ src/
 ## Known limits / next steps
 
 - Tabs keep running while you're detached, but quitting office stops them. Claude tabs
-  resume from their session ID afterwards, shells don't.
+  resume from their session ID afterwards, shells don't. `kill $(cat <folder>/.office/server.lock)`
+  stops a server from outside the same way `q` does.
+- On Windows the server's named pipe has the default permissions, so other users on the same
+  machine may be able to attach. Use it single-user there for now.
 - Everyone attached shares one view, sized to the smallest client. Window-size options,
   per-client views and read-only clients are planned in [docs/multi-client.md](docs/multi-client.md).
 - OSC 52 isn't passed on, so text selected by dragging inside fullscreen Claude Code doesn't

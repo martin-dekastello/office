@@ -31,8 +31,9 @@ window:
 ## Who can attach, and as whom
 
 - The socket's permissions follow `<folder>/.office`. The owner can always attach. Group
-  members can if `.office` is group-executable, and anyone can if it's world-executable. To
-  share with a team:
+  members can if they may write to `.office` (group `w` and `x`), and anyone can if everyone
+  may. Being able to only enter it isn't enough: `.office` is created with the usual umask, so
+  it is often `755`, and that must not hand out a shell. To share with a team:
 
   ```sh
   chgrp -R devs /srv/project/.office && chmod -R g+rwX /srv/project/.office
@@ -48,8 +49,13 @@ window:
   `SSH_AUTH_SOCK`, tokens. Attaching later doesn't change it, much as tmux behaves without
   `update-environment`.
 - Config: the server reads the starting user's `~/.config/office/config.toml` plus the
-  folder's `.office/config.toml`. On a shared server, put team settings (vault, sources,
-  prefix) in the folder's file.
+  folder's `.office/config.toml`. On a shared server, put team settings (vault, GitHub
+  sources, prefix) in the folder's file. Commands, repo paths and Jira stay in the starting
+  user's own config; the folder's file can't set them.
+- Windows: the named pipe is created with the default security descriptor, so other users
+  on the same machine may be able to open it. Treat a Windows machine as single-user until
+  the listener sets an owner-only descriptor (interprocess's `SecurityDescriptor::deserialize`
+  with SDDL `D:P(A;;GA;;;OW)`, passed through `ListenerOptionsExt::security_descriptor`).
 
 ## Settings for later
 

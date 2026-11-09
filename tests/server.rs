@@ -84,10 +84,9 @@ fn send(s: &mut UnixStream, tag: u8, payload: &[u8]) {
     s.write_all(&b).unwrap();
 }
 
+/// A client's first message: its size.
 fn hello(s: &mut UnixStream, cols: u16, rows: u16) {
-    let mut b = cols.to_be_bytes().to_vec();
-    b.extend_from_slice(&rows.to_be_bytes());
-    send(s, 1, &b);
+    send(s, 2, &serde_json::to_vec(&Event::Resize(cols, rows)).unwrap());
 }
 
 fn key(s: &mut UnixStream, c: char) {
@@ -138,7 +137,7 @@ fn one_server_per_folder_with_attach_detach_and_quit() {
     let mut server = env.server();
     let mut a = env.connect();
     let (welcome, _) = until(&mut a, 10);
-    assert_eq!(welcome, [1]); // mouse on by default
+    assert_eq!(welcome, [1, 1]); // mouse on by default, protocol version 1
     hello(&mut a, 100, 30);
     let (_, _) = until(&mut a, 11);
 
@@ -173,6 +172,28 @@ fn one_server_per_folder_with_attach_detach_and_quit() {
     assert!(!env.socket().exists());
     assert!(env.folder.join(".office/state.json").exists());
     assert_eq!(std::fs::read_to_string(env.folder.join(".office/.gitignore")).unwrap(), "*\n");
+}
+
+#[test]
+fn kill_stops_it_as_quitting_does() {
+    let env = Env::new();
+    let mut server = env.server();
+    let mut a = env.connect();
+    until(&mut a, 10);
+    hello(&mut a, 100, 30);
+    until(&mut a, 11);
+
+    let pid = read_trim(&env.folder.join(".office/server.lock"));
+    assert_eq!(pid, server.id().to_string());
+    let killed = Command::new("kill").args(["-TERM", &pid]).status().unwrap();
+    assert!(killed.success());
+
+    let (why, _) = until(&mut a, 14);
+    assert_eq!(why, b"office quit");
+    let st = wait_exit(&mut server).expect("server didn't stop");
+    assert!(st.success(), "{st:?}");
+    assert!(!env.socket().exists());
+    assert!(env.folder.join(".office/state.json").exists());
 }
 
 #[test]

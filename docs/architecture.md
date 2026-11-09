@@ -31,9 +31,9 @@ on purpose: two servers for one folder would fight over its state and its tabs. 
 ```
 <folder>/.office/
   .gitignore         "*": the folder ignores itself, so a repo's own .gitignore stays untouched
-  config.toml        optional; overrides ~/.config/office/config.toml key by key
+  config.toml        optional; overrides some keys of ~/.config/office/config.toml
   office.sock        the socket clients connect to
-  server.lock        locked by the running server
+  server.lock        locked by the running server; holds its pid
   server.log         the server's stderr
   state.json         tabs, Claude session ids, worktrees, default directory
   snapshots/         saved screens of suspended tabs
@@ -46,6 +46,13 @@ The folder's `config.toml` is merged over the global config. Tables merge key by
 anything else replaces the global value, arrays included: a folder that lists `[[github]]`
 sources gets only those, not the global ones as well.
 
+Only `vault`, `notes_dir`, `prefix`, `local_prefix`, `bell`, `mouse` and `[[github]]` (minus
+`path`) are taken from it (`FOLDER_KEYS` in `src/config.rs`). A repo can commit
+`.office/config.toml` with `git add -f`, and the `.gitignore` office writes doesn't stop a clone
+from bringing it along. So nothing that runs a command (`*_command`), points at a repository
+(`local_repo`, `path`: creating a worktree runs that repository's hooks) or sends a credential
+(`[[jira]]`) can come from the folder. The server logs the keys it ignored and flashes them.
+
 Every tab gets `OFFICE_DATA=<folder>/.office`. That is how `office hook` and `office tab new`
 running inside a tab reach their own office and not another folder's. Outside a tab, `office
 tab new`, `new`, `sync`, `list` and `paths` use the nearest folder above the current directory
@@ -53,7 +60,8 @@ that has a `.office` (as git finds `.git`), or `--folder` for `tab new`.
 
 If `<folder>/.office/office.sock` would be longer than a Unix socket path allows (about 100
 bytes), the socket goes to `/tmp/office-<hash of the folder>.sock` instead. Every user works
-out the same name.
+out the same name, so another user could bind it first. Before connecting, a client refuses a
+`/tmp` socket that isn't owned by the owner of `.office`, and any socket that is a symlink.
 
 ## Moving from the single global office
 
@@ -73,7 +81,11 @@ To undo it, quit office, then move `<folder>/.office/state.json` (with `snapshot
   going to `server.log`. It is a new process rather than a fork, because forking a process
   that already has threads isn't safe. zellij starts its server the same way.
 - Holding `server.lock` (std `File::try_lock`) makes the server the only one for its folder.
-  Any socket file it finds is stale, so it removes it and binds a new one.
+  Any socket file it finds is stale, so it removes it and binds a new one. The lock file holds
+  the server's pid.
+- `SIGTERM`, `SIGINT` and `SIGHUP` stop it the way `q` does: sessions and screens are saved,
+  clients hear `office quit`, the socket goes. So `kill $(cat .office/server.lock)` is a clean
+  stop.
 - An accept thread gives each client two threads: one reads its input onto the main loop's
   channel, the other writes its output from a bounded queue. The main loop is the loop the TUI
   always had: `tick`, draw, wait up to 33 ms for input. It now reads input from that channel
@@ -91,17 +103,22 @@ To undo it, quit office, then move `<folder>/.office/state.json` (with `snapshot
 
 ## Protocol (`src/proto.rs`)
 
-Each frame is a tag byte, a big-endian `u32` length, then the payload.
+Each frame is a tag byte, a big-endian `u32` length, then the payload. Frames are capped at
+16 MiB from clients and 64 MiB from the server.
 
 | tag | direction | payload |
 |---|---|---|
-| 1 `Hello` | client → server | cols, rows (`u16` each) |
-| 2 `Event` | client → server | a crossterm `Event` as JSON (key, mouse, paste, resize) |
-| 10 `Welcome` | server → client | 1 byte: capture the mouse or not |
+| 2 `Event` | client → server | a crossterm `Event` as JSON (key, mouse, paste, resize); the first is a `Resize` with the client's size |
+| 10 `Welcome` | server → client | capture the mouse or not (1 byte), protocol `VERSION` (1 byte) |
 | 11 `Output` | server → client | bytes to print |
 | 12 `Clipboard` | server → client | text to copy |
-| 13 `Open` | server → client | URL to open |
+| 13 `Open` | server → client | URL to open; the client only opens `http(s)://` and `obsidian://` |
 | 14 `Exit` | server → client | why: `detached`, `office quit` |
+
+A client and a server from different builds (office upgraded while a server ran) can meet. The
+client checks `VERSION` in `Welcome`, and a server from before there was one sends a single
+byte, read as version 0. On a mismatch the client says how to stop the old server. A client
+from before versions sends tag 1, which a newer server rejects, closing the connection.
 
 ## Prior art
 

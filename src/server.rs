@@ -22,6 +22,7 @@ use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::rc::Rc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, SyncSender, TrySendError};
 use std::thread::JoinHandle;
@@ -34,6 +35,8 @@ const FRAME: Duration = Duration::from_millis(33);
 const BACKLOG: usize = 16;
 /// How long quitting waits for clients to get their last message.
 const GOODBYE: Duration = Duration::from_secs(1);
+/// How long a new server waits for one that is quitting to let go of the folder.
+const LOCK_WAIT: Duration = Duration::from_secs(3);
 /// Starts a client's screen afresh.
 const CLEAR: &[u8] = b"\x1b[0m\x1b[H\x1b[2J";
 
@@ -44,6 +47,7 @@ enum Incoming {
 }
 
 /// Where a client's terminal writes, to be taken and sent after each draw.
+/// (ratatui's own `writer_mut` is behind an unstable feature.)
 #[derive(Clone, Default)]
 struct Sink(Rc<RefCell<Vec<u8>>>);
 
@@ -68,7 +72,7 @@ type ClientTerm = Terminal<CrosstermBackend<Sink>>;
 struct Client {
     out: SyncSender<ServerMsg>,
     writer: JoinHandle<()>,
-    /// Columns and rows, once it said hello.
+    /// Columns and rows, once it sent its size.
     size: Option<(u16, u16)>,
     /// What its screen shows, for the diff. None means it needs a full redraw.
     term: Option<ClientTerm>,
@@ -87,6 +91,16 @@ impl Client {
             Err(TrySendError::Disconnected(_)) => false,
         }
     }
+
+    /// Send its last message, waiting behind a full backlog rather than
+    /// dropping it. Its writer ends once that is out; here is its handle.
+    fn last(self, m: ServerMsg) -> JoinHandle<()> {
+        let out = self.out;
+        std::thread::spawn(move || {
+            let _ = out.send(m);
+        });
+        self.writer
+    }
 }
 
 struct Server {
@@ -99,7 +113,7 @@ struct Server {
 /// `office server <folder>`: run in the background until quit.
 pub fn run(inst: Instance) -> Result<()> {
     inst.ensure_dir()?;
-    let _lock = inst.lock()?;
+    let _lock = lock(&inst)?;
     let global = config::global_data_dir();
     let moved = instance::migrate(&global, &inst.dir)?;
     config::set_data_dir(inst.dir.clone());
@@ -111,11 +125,18 @@ pub fn run(inst: Instance) -> Result<()> {
     if moved {
         app.flash(format!("Your tabs and sessions moved here from {}", config::shorten(&global)));
     }
+    if !app.cfg.ignored.is_empty() {
+        app.flash(format!(
+            "Ignored in .office/config.toml: {} (only your own config may set these)",
+            app.cfg.ignored.join(", ")
+        ));
+    }
     let rx = listen(&inst)?;
+    let stop = stop_on_signal();
     eprintln!("office serving {}", inst.folder.display());
 
     let mut srv = Server { clients: BTreeMap::new(), shared: None, mouse };
-    while !app.quit {
+    while !app.quit && !stop.load(Ordering::Relaxed) {
         app.tick();
         app.sync_viewer();
         srv.render(&mut app);
@@ -150,16 +171,49 @@ pub fn run(inst: Instance) -> Result<()> {
     // Dropping the app kills the tabs' processes.
 }
 
-/// Socket permissions follow `.office`: whoever may enter it may attach.
+/// Take the folder's lock. A server that just quit holds it a moment longer,
+/// while its tabs stop, after removing its socket; so with no socket there,
+/// wait for it rather than fail a restart.
+fn lock(inst: &Instance) -> Result<std::fs::File> {
+    let deadline = Instant::now() + LOCK_WAIT;
+    loop {
+        match inst.lock() {
+            Ok(f) => return Ok(f),
+            #[cfg(unix)]
+            Err(_) if Instant::now() < deadline && !inst.socket_path().exists() => {
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            #[cfg(windows)]
+            Err(_) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(50)),
+            Err(e) => return Err(e),
+        }
+    }
+}
+
+/// Set when the server is told to stop (`kill`, shutdown, hangup), so it saves
+/// sessions and screens and says goodbye as quitting does.
+fn stop_on_signal() -> Arc<AtomicBool> {
+    let stop = Arc::new(AtomicBool::new(false));
+    #[cfg(unix)]
+    for sig in [signal_hook::consts::SIGTERM, signal_hook::consts::SIGINT, signal_hook::consts::SIGHUP] {
+        if let Err(e) = signal_hook::flag::register(sig, stop.clone()) {
+            eprintln!("can't catch signal {sig}: {e}");
+        }
+    }
+    stop
+}
+
+/// The socket's mode for a `.office` with mode `dir`: whoever may write there
+/// (enter and write) may attach. Not merely enter: a plain `mkdir` under the
+/// usual umask leaves a folder others can enter, and attaching means running
+/// commands as the server's user.
 #[cfg(unix)]
-fn socket_mode(dir: &std::path::Path) -> u32 {
-    use std::os::unix::fs::PermissionsExt;
-    let dir = std::fs::metadata(dir).map(|m| m.permissions().mode()).unwrap_or(0o700);
+fn socket_mode(dir: u32) -> u32 {
     let mut mode = 0o600;
-    if dir & 0o010 != 0 {
+    if dir & 0o030 == 0o030 {
         mode |= 0o060;
     }
-    if dir & 0o001 != 0 {
+    if dir & 0o003 == 0o003 {
         mode |= 0o006;
     }
     mode
@@ -168,9 +222,17 @@ fn socket_mode(dir: &std::path::Path) -> u32 {
 /// Accept clients in the background. Each gets a thread reading its input and
 /// one writing its output; everything arrives on the returned channel.
 fn listen(inst: &Instance) -> Result<Receiver<Incoming>> {
-    // Holding the lock means any socket file left there is stale.
+    // Holding the lock means any socket file left there is stale, unless it
+    // is someone else's in /tmp, which sticky /tmp won't let us remove.
     #[cfg(unix)]
-    let _ = std::fs::remove_file(inst.socket_path());
+    {
+        inst.check_socket()?;
+        if let Err(e) = std::fs::remove_file(inst.socket_path()) {
+            if e.kind() != std::io::ErrorKind::NotFound {
+                return Err(e).with_context(|| format!("removing the old socket {}", inst.socket_path().display()));
+            }
+        }
+    }
     let listener = ListenerOptions::new()
         .name(inst.socket_name()?)
         .create_sync()
@@ -180,7 +242,8 @@ fn listen(inst: &Instance) -> Result<Receiver<Incoming>> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(inst.socket_path(), std::fs::Permissions::from_mode(socket_mode(&inst.dir)))
+        let dir = std::fs::metadata(&inst.dir).map(|m| m.permissions().mode()).unwrap_or(0o700);
+        std::fs::set_permissions(inst.socket_path(), std::fs::Permissions::from_mode(socket_mode(dir)))
             .context("setting the socket's permissions")?;
     }
     let (tx, rx) = mpsc::channel();
@@ -198,6 +261,7 @@ fn listen(inst: &Instance) -> Result<Receiver<Incoming>> {
 }
 
 /// One end of a connection shared by its reading and writing threads.
+/// interprocess suggests this over `split()`, which it deprecates.
 pub struct Conn(pub Arc<interprocess::local_socket::Stream>);
 
 impl Read for Conn {
@@ -269,11 +333,11 @@ impl Server {
         match m {
             Incoming::Connected(id, out, writer) => {
                 let mut c = Client { out, writer, size: None, term: None, sink: Sink::default() };
-                if c.send(ServerMsg::Welcome { mouse: self.mouse }) {
+                if c.send(ServerMsg::Welcome { version: crate::proto::VERSION, mouse: self.mouse }) {
                     self.clients.insert(id, c);
                 }
             }
-            Incoming::Msg(id, ClientMsg::Hello { cols, rows } | ClientMsg::Event(Event::Resize(cols, rows))) => {
+            Incoming::Msg(id, ClientMsg::Event(Event::Resize(cols, rows))) => {
                 if let Some(c) = self.clients.get_mut(&id) {
                     c.size = Some((cols.max(1), rows.max(1)));
                     c.term = None;
@@ -289,10 +353,10 @@ impl Server {
                 let Some(c) = self.clients.get_mut(&id) else { return };
                 let alive = outbox.into_iter().all(|m| c.send(m));
                 if detach {
-                    // Its writer sends this, then ends as the client is dropped.
-                    c.send(ServerMsg::Exit("detached".into()));
-                }
-                if detach || !alive {
+                    if let Some(c) = self.clients.remove(&id) {
+                        c.last(ServerMsg::Exit("detached".into()));
+                    }
+                } else if !alive {
                     self.clients.remove(&id);
                 }
             }
@@ -338,14 +402,8 @@ impl Server {
     /// Tell every client office is gone, giving each a moment to hear it.
     fn goodbye(self, reason: &str) {
         let deadline = Instant::now() + GOODBYE;
-        let writers: Vec<JoinHandle<()>> = self
-            .clients
-            .into_values()
-            .map(|mut c| {
-                c.send(ServerMsg::Exit(reason.into()));
-                c.writer
-            })
-            .collect();
+        let writers: Vec<JoinHandle<()>> =
+            self.clients.into_values().map(|c| c.last(ServerMsg::Exit(reason.into()))).collect();
         for w in writers {
             while !w.is_finished() && Instant::now() < deadline {
                 std::thread::sleep(Duration::from_millis(10));
@@ -358,8 +416,13 @@ impl Server {
 /// terminal. A fresh exec rather than a fork, which isn't safe once threads exist.
 pub fn spawn(inst: &Instance) -> Result<()> {
     use std::process::{Command, Stdio};
-    let log = std::fs::File::create(inst.log_path())
-        .with_context(|| format!("creating {}", inst.log_path().display()))?;
+    // Appended to: when two starts race, the one that loses mustn't wipe the
+    // log of the one that won.
+    let log = std::fs::File::options()
+        .create(true)
+        .append(true)
+        .open(inst.log_path())
+        .with_context(|| format!("opening {}", inst.log_path().display()))?;
     let mut cmd = Command::new(std::env::current_exe()?);
     cmd.arg("server")
         .arg(&inst.folder)
@@ -401,6 +464,17 @@ mod tests {
         assert_eq!(shared_size([].into_iter()), None);
         assert_eq!(shared_size([(200, 50)].into_iter()), Some((200, 50)));
         assert_eq!(shared_size([(200, 40), (120, 60), (150, 30)].into_iter()), Some((120, 30)));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn only_those_who_may_write_to_office_may_attach() {
+        assert_eq!(socket_mode(0o755), 0o600, "a plain mkdir under umask 022");
+        assert_eq!(socket_mode(0o700), 0o600);
+        assert_eq!(socket_mode(0o2775), 0o660, "chmod g+rwX for a team");
+        assert_eq!(socket_mode(0o757), 0o606);
+        assert_eq!(socket_mode(0o1777), 0o666);
+        assert_eq!(socket_mode(0o720), 0o600, "writing without entering isn't enough");
     }
 
     #[test]
