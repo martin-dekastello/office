@@ -1,8 +1,8 @@
 use crate::api::{self, Reply, Request};
-use crate::clipboard;
 use crate::complete::{self, Completion};
 use crate::config::Config;
 use crate::keys;
+use crate::proto::ServerMsg;
 use crate::providers::{self, SyncReport};
 use crate::state::{self, IssueState, SortMode, State, TabKind, TabState};
 use crate::status::{self, ClaudeStatus};
@@ -12,12 +12,11 @@ use crate::vault::{NewNote, Note, Stage, Vault};
 use crate::worktree;
 use anyhow::Result;
 use crossterm::event::{
-    self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent,
+    Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent,
     MouseEventKind,
 };
 use ratatui::layout::{Position, Rect};
 use std::collections::HashMap;
-use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::time::{Duration, Instant};
@@ -215,12 +214,11 @@ pub enum PromptKind {
     RenameTab,
     ClaudeDir,
     DefaultDir,
-    StartupDir,
 }
 
 impl PromptKind {
     fn is_dir(&self) -> bool {
-        matches!(self, PromptKind::ClaudeDir | PromptKind::DefaultDir | PromptKind::StartupDir)
+        matches!(self, PromptKind::ClaudeDir | PromptKind::DefaultDir)
     }
 }
 
@@ -242,6 +240,8 @@ pub enum Mode {
 
 pub struct App {
     pub cfg: Config,
+    /// The folder this office runs in: where tabs on issues with no repo start.
+    pub folder: PathBuf,
     pub vault: Vault,
     pub notes: Vec<Note>,
     pub view: Stage,
@@ -263,6 +263,10 @@ pub struct App {
     pub syncing: bool,
     pub spinner: usize,
     pub quit: bool,
+    /// The client whose input this was asked to detach.
+    pub detach: bool,
+    /// For the client whose input this is: what to copy or open on its side.
+    pub outbox: Vec<ServerMsg>,
     hooks_settings: Option<PathBuf>,
     bell_pending: bool,
     // Hit areas from the last draw.
@@ -296,19 +300,13 @@ fn home() -> PathBuf {
     dirs::home_dir().unwrap_or_else(|| PathBuf::from("."))
 }
 
-/// The saved default directory if it still exists, otherwise home.
-fn usable_default(saved: Option<&Path>, home: PathBuf) -> PathBuf {
-    saved.filter(|p| p.is_dir()).map_or(home, Path::to_path_buf)
-}
-
-/// The launch directory, if it isn't already the default.
-fn startup_dir(launch: &Path, default: &Path) -> Option<PathBuf> {
-    let launch = std::fs::canonicalize(launch).ok()?;
-    (std::fs::canonicalize(default).ok().as_ref() != Some(&launch)).then_some(launch)
+/// The saved default directory if it still exists, otherwise office's folder.
+fn usable_default(saved: Option<&Path>, folder: &Path) -> PathBuf {
+    saved.filter(|p| p.is_dir()).unwrap_or(folder).to_path_buf()
 }
 
 impl App {
-    pub fn new(cfg: Config, first_run: bool) -> Result<App> {
+    pub fn new(cfg: Config, first_run: bool, folder: PathBuf) -> Result<App> {
         let vault = Vault::new(cfg.notes_root())?;
         let notes = vault.scan();
         let state = State::load();
@@ -320,6 +318,7 @@ impl App {
                     || (id == SCRATCH && state.issues.get(SCRATCH).is_some_and(|s| !s.tabs.is_empty()))
             }),
             cfg,
+            folder,
             vault,
             notes,
             view: Stage::Active,
@@ -336,6 +335,8 @@ impl App {
             syncing: false,
             spinner: 0,
             quit: false,
+            detach: false,
+            outbox: vec![],
             hooks_settings,
             bell_pending: false,
             term_rect: Rect::default(),
@@ -366,10 +367,6 @@ impl App {
             app.flash(format!("Created {} — set your vault and sources there", crate::config::config_path().display()));
         } else if app.notes.is_empty() {
             app.flash("No issues yet: n = new local issue, S = sync GitHub/Jira".into());
-        }
-        let launch = std::env::current_dir().ok();
-        if let Some(dir) = launch.and_then(|d| startup_dir(&d, &app.default_dir())) {
-            app.mode = Mode::Prompt(PromptKind::StartupDir, crate::config::shorten(&dir));
         }
         app.start_sync();
         Ok(app)
@@ -538,9 +535,7 @@ impl App {
             "obsidian://open?path={}",
             urlencoding::encode(&n.path.to_string_lossy())
         );
-        if let Err(e) = open::that_detached(&url) {
-            self.flash(format!("Could not open Obsidian: {e}"));
-        }
+        self.outbox.push(ServerMsg::Open(url));
     }
 
     // ---------- sync ----------
@@ -638,7 +633,7 @@ impl App {
     }
 
     pub fn default_dir(&self) -> PathBuf {
-        usable_default(self.state.default_dir.as_deref(), home())
+        usable_default(self.state.default_dir.as_deref(), &self.folder)
     }
 
     /// Working directory for an issue's tab. The worktree is created the first
@@ -788,6 +783,8 @@ impl App {
         let mut env = vec![
             ("SALASH_TAB".to_string(), st.id.clone()),
             ("SALASH_ISSUE".to_string(), id.to_string()),
+            // Hooks and `office tab new` in the tab reach this office, not another folder's.
+            ("OFFICE_DATA".to_string(), crate::config::data_dir().to_string_lossy().into_owned()),
         ];
         if let Some(note) = note {
             env.push(("SALASH_NOTE".to_string(), note.path.to_string_lossy().into_owned()));
@@ -1086,7 +1083,7 @@ impl App {
 
     /// Before quitting: keep Claude tabs readable, and don't leave a session
     /// id behind that `--resume` can't find.
-    fn save_sessions(&mut self) {
+    pub fn save_sessions(&mut self) {
         let ids: Vec<String> = self.rt.keys().cloned().collect();
         for id in ids {
             let rt = self.rt_for(&id);
@@ -1274,13 +1271,9 @@ impl App {
         }
     }
 
-    pub fn ring_bell_if_needed(&mut self) {
-        if self.bell_pending && self.cfg.bell {
-            let mut out = std::io::stdout();
-            let _ = out.write_all(b"\x07");
-            let _ = out.flush();
-        }
-        self.bell_pending = false;
+    /// True if the clients' terminals should ring.
+    pub fn take_bell(&mut self) -> bool {
+        std::mem::take(&mut self.bell_pending) && self.cfg.bell
     }
 
     /// Keep panes of the visible issue sized to the terminal area.
@@ -1410,12 +1403,8 @@ impl App {
         }
         self.pane_select = None;
         if let Some(text) = text {
-            let n = text.chars().count();
-            self.flash(if clipboard::copy(&text) {
-                format!("Copied {n} characters")
-            } else {
-                format!("Asked the terminal to copy {n} characters")
-            });
+            self.flash(format!("Copied {} characters", text.chars().count()));
+            self.outbox.push(ServerMsg::Clipboard(text));
         }
     }
 
@@ -1512,7 +1501,7 @@ impl App {
                             PromptKind::NewIssue => self.new_local_issue(buf),
                             PromptKind::RenameTab => self.rename_tab(buf),
                             PromptKind::ClaudeDir => self.new_claude_in(buf),
-                            PromptKind::DefaultDir | PromptKind::StartupDir => self.set_default_dir(kind, buf),
+                            PromptKind::DefaultDir => self.set_default_dir(kind, buf),
                         }
                     }
                     KeyCode::Tab | KeyCode::BackTab if kind.is_dir() => {
@@ -1650,7 +1639,7 @@ impl App {
             KeyCode::Char('o') => self.open_obsidian(),
             KeyCode::Char('w') => {
                 if let Some(u) = self.selected_note().and_then(|n| n.url.clone()) {
-                    let _ = open::that_detached(u);
+                    self.outbox.push(ServerMsg::Open(u));
                 } else {
                     self.flash("This issue has no URL".into());
                 }
@@ -1689,6 +1678,7 @@ impl App {
                 self.focus = if self.can_focus_terminal() { Focus::Terminal } else { Focus::Sidebar };
             }
             KeyCode::Char('q') => self.mode = Mode::Confirm(ConfirmKind::Quit),
+            KeyCode::Char('D') => self.detach = true,
             KeyCode::Char('?') => self.mode = Mode::Help,
             _ => return false,
         }
@@ -1786,31 +1776,6 @@ impl App {
     }
 }
 
-/// Main loop.
-pub fn run(app: &mut App, terminal: &mut ratatui::DefaultTerminal) -> Result<()> {
-    while !app.quit {
-        app.tick();
-        app.sync_viewer();
-        terminal.draw(|f| crate::ui::draw(app, f))?;
-        app.resize_visible();
-        app.ring_bell_if_needed();
-        if event::poll(Duration::from_millis(33))? {
-            app.handle(event::read()?);
-            // Drain bursts (fast typing, paste) before the next frame.
-            while event::poll(Duration::ZERO)? {
-                app.handle(event::read()?);
-                if app.quit {
-                    break;
-                }
-            }
-        }
-    }
-    app.save_sessions();
-    app.state.selected = app.selected.clone();
-    app.state.save();
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1844,36 +1809,15 @@ mod tests {
     }
 
     #[test]
-    fn startup_asks_only_outside_the_default() {
-        let dir = std::env::temp_dir().join(format!("salash-test-{}", uuid::Uuid::new_v4()));
-        let (a, b) = (dir.join("a"), dir.join("b"));
-        std::fs::create_dir_all(&a).unwrap();
-        std::fs::create_dir_all(&b).unwrap();
-
-        assert_eq!(startup_dir(&a, &a), None);
-        assert_eq!(startup_dir(&a.join("../a"), &a), None);
-        assert_eq!(startup_dir(&a, &b), std::fs::canonicalize(&a).ok());
-        assert_eq!(startup_dir(&dir.join("missing"), &a), None);
-        #[cfg(unix)]
-        {
-            let link = dir.join("link");
-            std::os::unix::fs::symlink(&a, &link).unwrap();
-            assert_eq!(startup_dir(&link, &a), None);
-        }
-
-        std::fs::remove_dir_all(dir).ok();
-    }
-
-    #[test]
-    fn a_deleted_default_falls_back_to_home() {
-        let dir = std::env::temp_dir().join(format!("salash-test-{}", uuid::Uuid::new_v4()));
+    fn a_deleted_default_falls_back_to_the_folder() {
+        let dir = std::env::temp_dir().join(format!("office-test-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
-        let home = PathBuf::from("/home");
+        let folder = Path::new("/srv/team");
 
-        assert_eq!(usable_default(Some(&dir), home.clone()), dir);
-        assert_eq!(usable_default(None, home.clone()), home);
+        assert_eq!(usable_default(Some(&dir), folder), dir);
+        assert_eq!(usable_default(None, folder), folder);
         std::fs::remove_dir_all(&dir).ok();
-        assert_eq!(usable_default(Some(&dir), home.clone()), home);
+        assert_eq!(usable_default(Some(&dir), folder), folder);
     }
 
     #[test]

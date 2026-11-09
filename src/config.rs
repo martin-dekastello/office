@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 /// A GitHub repository to pull issues from (via the `gh` CLI).
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -98,7 +99,8 @@ impl Default for Config {
     }
 }
 
-const TEMPLATE: &str = r#"# salash configuration
+const TEMPLATE: &str = r#"# office configuration
+# <folder>/.office/config.toml overrides any of these for `office <folder>`.
 
 # Obsidian vault root and the folder inside it that holds active/ done/ archive/
 vault = "{VAULT}"
@@ -149,9 +151,34 @@ pub fn config_path() -> PathBuf {
         .join("config.toml")
 }
 
+/// The data dir of the folder this process serves, set once at startup.
+static DATA_DIR: OnceLock<PathBuf> = OnceLock::new();
+
+/// Make `data_dir()` the folder's `.office` for the rest of the process.
+pub fn set_data_dir(dir: PathBuf) {
+    let _ = DATA_DIR.set(dir);
+}
+
+/// Where state, saved screens and status files live: the folder's `.office`
+/// in the server and in its tabs (`$OFFICE_DATA`), the global one otherwise.
 pub fn data_dir() -> PathBuf {
-    if let Ok(p) = std::env::var("SALASH_DATA") {
+    if let Some(d) = DATA_DIR.get() {
+        return d.clone();
+    }
+    if let Ok(p) = std::env::var("OFFICE_DATA") {
         return PathBuf::from(p);
+    }
+    global_data_dir()
+}
+
+/// The data dir from before there was one per folder. `$OFFICE_DATA` counts
+/// unless it names a folder's `.office`, as it does inside a tab.
+pub fn global_data_dir() -> PathBuf {
+    if let Ok(p) = std::env::var("OFFICE_DATA") {
+        let p = PathBuf::from(p);
+        if p.file_name() != Some(std::ffi::OsStr::new(crate::instance::DIR)) {
+            return p;
+        }
     }
     dirs::data_local_dir()
         .unwrap_or_else(|| PathBuf::from("."))
@@ -179,8 +206,9 @@ pub fn shorten(p: &Path) -> String {
 }
 
 impl Config {
-    /// Load the config, writing a commented template on first run.
-    pub fn load() -> Result<(Config, bool)> {
+    /// Load the config, writing a commented template on first run, with a
+    /// folder's `.office/config.toml` over it if given.
+    pub fn load_for(instance_dir: Option<&Path>) -> Result<(Config, bool)> {
         let path = config_path();
         let mut created = false;
         if !path.exists() {
@@ -196,8 +224,18 @@ impl Config {
         }
         let text = std::fs::read_to_string(&path)
             .with_context(|| format!("reading {}", path.display()))?;
-        let mut cfg: Config =
+        let mut table: toml::Table =
             toml::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
+        if let Some(over) = instance_dir.map(|d| d.join("config.toml")).filter(|p| p.exists()) {
+            let text = std::fs::read_to_string(&over)
+                .with_context(|| format!("reading {}", over.display()))?;
+            let t: toml::Table =
+                toml::from_str(&text).with_context(|| format!("parsing {}", over.display()))?;
+            merge(&mut table, t);
+        }
+        let mut cfg: Config = toml::Value::Table(table)
+            .try_into()
+            .with_context(|| format!("parsing {}", path.display()))?;
         cfg.vault = expand(&cfg.vault);
         cfg.worktrees_dir = expand(&cfg.worktrees_dir);
         cfg.local_repo = cfg.local_repo.as_deref().map(expand);
@@ -263,6 +301,60 @@ impl Config {
     }
 }
 
+/// Put `over` on top of `base`: tables merge key by key, anything else
+/// (including arrays like `[[github]]`) replaces what was there.
+fn merge(base: &mut toml::Table, over: toml::Table) {
+    for (k, v) in over {
+        match (base.get_mut(&k), v) {
+            (Some(toml::Value::Table(b)), toml::Value::Table(o)) => merge(b, o),
+            (_, v) => {
+                base.insert(k, v);
+            }
+        }
+    }
+}
+
 fn toml_escape(p: &Path) -> String {
     p.to_string_lossy().replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn folder_config_overrides_keys_and_replaces_arrays() {
+        let mut base: toml::Table = toml::from_str(
+            r#"
+            vault = "/global"
+            prefix = "ctrl-a"
+            [[github]]
+            repo = "a/one"
+            [[github]]
+            repo = "a/two"
+            [extra]
+            x = 1
+            y = 2
+            "#,
+        )
+        .unwrap();
+        let over: toml::Table = toml::from_str(
+            r#"
+            vault = "/team"
+            [[github]]
+            repo = "b/three"
+            [extra]
+            y = 3
+            "#,
+        )
+        .unwrap();
+        merge(&mut base, over);
+        assert_eq!(base["vault"].as_str(), Some("/team"));
+        assert_eq!(base["prefix"].as_str(), Some("ctrl-a"));
+        let gh = base["github"].as_array().unwrap();
+        assert_eq!(gh.len(), 1);
+        assert_eq!(gh[0]["repo"].as_str(), Some("b/three"));
+        assert_eq!(base["extra"]["x"].as_integer(), Some(1));
+        assert_eq!(base["extra"]["y"].as_integer(), Some(3));
+    }
 }

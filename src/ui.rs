@@ -78,13 +78,12 @@ pub fn draw(app: &mut App, f: &mut Frame) {
                 PromptKind::RenameTab => " Rename tab (empty = auto) ".into(),
                 PromptKind::ClaudeDir => " New Claude tab — directory (Tab completes, empty = issue default) ".into(),
                 PromptKind::DefaultDir => format!(" Default directory — Tab completes, empty keeps {default} "),
-                PromptKind::StartupDir => format!(" Use as default directory? Esc keeps {default} "),
             };
             draw_prompt(f, area, &title, &buf, app.completion.as_ref());
         }
         Mode::Confirm(kind) => {
             let q = match kind {
-                ConfirmKind::Quit => "Quit salash? Sessions stop; Claude tabs resume next time. [y/N]",
+                ConfirmKind::Quit => "Quit office for everyone attached? Sessions stop; Claude tabs resume next time. (D detaches instead) [y/N]",
                 ConfirmKind::CloseTab => "Close this tab and stop its process? (R reopens Claude tabs) [y/N]",
                 ConfirmKind::Suspend => "Claude isn't idle, so this interrupts it. Suspend anyway? [y/N]",
             };
@@ -107,7 +106,7 @@ fn draw_sidebar(app: &mut App, f: &mut Frame, area: Rect) {
         Constraint::Length(1),
         Constraint::Length(2),
         Constraint::Min(1),
-        Constraint::Length(4),
+        Constraint::Length(5),
     ])
     .areas(inner);
 
@@ -227,6 +226,7 @@ fn draw_sidebar(app: &mut App, f: &mut Frame, area: Rect) {
             Line::from(Span::styled(" o obsidian d done n new ? keys", Style::new().fg(colors().fg_dim))),
             Line::from(Span::styled(" x close tab p default dir q quit", Style::new().fg(colors().fg_dim))),
             Line::from(Span::styled(" z suspend R reopen ` scratch", Style::new().fg(colors().fg_dim))),
+            Line::from(Span::styled(" D detach", Style::new().fg(colors().fg_dim))),
         ]
     } else {
         vec![
@@ -486,7 +486,7 @@ fn draw_help(app: &App, f: &mut Frame, area: Rect) {
         ("0/1/2/3, h/v".into(), "view To-do / Active / Done / Archive"),
         ("s".into(), "sort by created / name / moved / activity"),
         ("Tab / Esc".into(), "back to terminal"),
-        ("x / q".into(), "close tab / quit"),
+        ("x / D / q".into(), "close tab / detach / quit"),
         ("".into(), ""),
         (format!("Anywhere: {p} then…"), ""),
         ("s / Tab".into(), "toggle sidebar ↔ terminal focus"),
@@ -504,7 +504,8 @@ fn draw_help(app: &App, f: &mut Frame, area: Rect) {
         ("S / r".into(), "sync GitHub/Jira"),
         ("[ / ]".into(), "scroll the tab back / forward (also mouse wheel)"),
         (p.to_string(), "send the prefix key itself"),
-        ("q".into(), "quit"),
+        ("D".into(), "detach: office keeps running, `office --attach` returns"),
+        ("q".into(), "quit office for everyone attached"),
         ("".into(), ""),
         ("Status".into(), "✳ working  ● needs you  ● done  ○ idle  ✕ exited"),
         ("".into(), "– suspended (⏎ resumes, scrolling still works)"),
