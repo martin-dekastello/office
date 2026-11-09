@@ -50,6 +50,41 @@ pub struct IssueState {
     pub closed: Vec<TabState>,
 }
 
+/// Order of the issue list in the sidebar.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum SortMode {
+    /// Newest created first.
+    #[default]
+    Created,
+    /// By title.
+    Name,
+    /// Most recently moved to its stage first.
+    Moved,
+    /// Most urgent Claude or shell activity first.
+    Activity,
+}
+
+impl SortMode {
+    pub fn next(self) -> SortMode {
+        match self {
+            SortMode::Created => SortMode::Name,
+            SortMode::Name => SortMode::Moved,
+            SortMode::Moved => SortMode::Activity,
+            SortMode::Activity => SortMode::Created,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            SortMode::Created => "created",
+            SortMode::Name => "name",
+            SortMode::Moved => "moved",
+            SortMode::Activity => "activity",
+        }
+    }
+}
+
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct State {
     pub issues: BTreeMap<String, IssueState>,
@@ -57,6 +92,8 @@ pub struct State {
     /// Where tabs start on issues with no repo. None means home.
     #[serde(default)]
     pub default_dir: Option<PathBuf>,
+    #[serde(default)]
+    pub sort: SortMode,
 }
 
 fn path() -> PathBuf {
@@ -132,6 +169,7 @@ mod tests {
         ]}},"selected":"i"}"#;
         let st: State = serde_json::from_str(json).unwrap();
         assert_eq!(st.default_dir, None);
+        assert_eq!(st.sort, SortMode::Created);
         assert_eq!(st.issues["i"].tabs[0].claude_session.as_deref(), Some("s"));
         assert_eq!(st.issues["i"].tabs[0].cwd, None);
     }
