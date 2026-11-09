@@ -150,8 +150,8 @@ On a suspended tab, `⏎` resumes, and the wheel, `↑` `↓` `PgUp` `PgDn` `g` 
 `prefix [ ]` scroll. Moving to a suspended tab never starts it. `R` keeps the last 10 closed
 Claude tabs per issue.
 
-The mouse is captured so you can click issues and tabs, a tab's `×` to close it, and `quit`
-at the top of the sidebar. Both ask first. Inside a tab, the wheel, clicks and
+The mouse is captured so you can click issues, tabs, the To-do/Active/Done/Archive views,
+a tab's `×` to close it, and `quit` at the top of the sidebar. Closing and quitting ask first. Inside a tab, the wheel, clicks and
 drags go to the app when it handles the mouse itself, as Claude Code does with
 `"tui": "fullscreen"`. Apps on the alternate screen that don't (`less`) get arrow keys from
 the wheel. Anything else scrolls office's scrollback.
