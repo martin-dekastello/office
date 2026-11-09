@@ -461,7 +461,7 @@ impl Drop for Pane {
     fn drop(&mut self) {
         if self.exited.is_none() {
             let _ = self.child.kill();
-            // Reap it, or it stays a zombie until office quits.
+            // Reap it, or it stays a zombie until salash quits.
             let _ = self.child.wait();
         }
     }
@@ -489,7 +489,7 @@ mod tests {
 
     impl Recorder {
         fn start(setup: &str) -> Recorder {
-            let log = std::env::temp_dir().join(format!("office-test-{}", uuid::Uuid::new_v4()));
+            let log = std::env::temp_dir().join(format!("salash-test-{}", uuid::Uuid::new_v4()));
             let script = format!("stty raw -echo; printf '{setup}'; echo ready; exec cat > '{}'", log.display());
             let argv = ["sh".to_string(), "-c".to_string(), script];
             let pane = Pane::spawn(&argv, &std::env::temp_dir(), &[], 5, 40).unwrap();

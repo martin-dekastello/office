@@ -87,7 +87,7 @@ mod tests {
     const S: char = MAIN_SEPARATOR;
 
     fn tree(dirs: &[&str]) -> PathBuf {
-        let root = std::env::temp_dir().join(format!("office-test-{}", uuid::Uuid::new_v4()));
+        let root = std::env::temp_dir().join(format!("salash-test-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&root).unwrap();
         for d in dirs {
             std::fs::create_dir_all(root.join(d)).unwrap();

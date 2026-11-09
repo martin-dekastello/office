@@ -1,6 +1,6 @@
 //! Opening tabs from outside the UI.
 //!
-//! `office tab new` writes a request to <data>/requests/<id>.json; the UI
+//! `salash tab new` writes a request to <data>/requests/<id>.json; the UI
 //! picks it up on its next poll, opens the tab, and answers with
 //! <id>.reply.json.
 
@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-/// How long `office tab new` waits for the UI to answer.
+/// How long `salash tab new` waits for the UI to answer.
 const REPLY_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Values for `claude --permission-mode`.
@@ -99,7 +99,7 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
     Ok(())
 }
 
-/// `office tab new`: hand the request to the running UI and wait for its answer.
+/// `salash tab new`: hand the request to the running UI and wait for its answer.
 pub fn submit(req: &Request) -> Result<Reply> {
     submit_in(&requests_dir(), req, REPLY_TIMEOUT)
 }
@@ -119,15 +119,15 @@ fn submit_in(dir: &Path, req: &Request, timeout: Duration) -> Result<Reply> {
         }
         std::thread::sleep(Duration::from_millis(50));
     }
-    // Withdrawn, so a later office start doesn't open it by surprise.
+    // Withdrawn, so a later salash start doesn't open it by surprise.
     if std::fs::remove_file(&path).is_ok() {
-        bail!("office doesn't seem to be running");
+        bail!("salash doesn't seem to be running");
     }
-    bail!("office took the request but didn't answer");
+    bail!("salash took the request but didn't answer");
 }
 
 /// Requests waiting for the UI. Each is claimed by renaming it first, so two
-/// office instances never both open it.
+/// salash instances never both open it.
 pub fn take_requests() -> Vec<(String, Result<Request>)> {
     take_in(&requests_dir())
 }
@@ -173,7 +173,7 @@ mod tests {
     }
 
     fn temp() -> PathBuf {
-        std::env::temp_dir().join(format!("office-test-{}", uuid::Uuid::new_v4()))
+        std::env::temp_dir().join(format!("salash-test-{}", uuid::Uuid::new_v4()))
     }
 
     #[test]

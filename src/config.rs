@@ -95,7 +95,7 @@ impl Default for Config {
     }
 }
 
-const TEMPLATE: &str = r#"# office configuration
+const TEMPLATE: &str = r#"# salash configuration
 
 # Obsidian vault root and the folder inside it that holds active/ done/ archive/
 vault = "{VAULT}"
@@ -136,22 +136,22 @@ prefix = "ctrl-a"
 "#;
 
 pub fn config_path() -> PathBuf {
-    if let Ok(p) = std::env::var("OFFICE_CONFIG") {
+    if let Ok(p) = std::env::var("SALASH_CONFIG") {
         return PathBuf::from(p);
     }
     dirs::config_dir()
         .unwrap_or_else(|| PathBuf::from("."))
-        .join("office")
+        .join("salash")
         .join("config.toml")
 }
 
 pub fn data_dir() -> PathBuf {
-    if let Ok(p) = std::env::var("OFFICE_DATA") {
+    if let Ok(p) = std::env::var("SALASH_DATA") {
         return PathBuf::from(p);
     }
     dirs::data_local_dir()
         .unwrap_or_else(|| PathBuf::from("."))
-        .join("office")
+        .join("salash")
 }
 
 /// Expand a leading "~" to the home directory.

@@ -745,12 +745,12 @@ impl App {
             }
         };
         let mut env = vec![
-            ("OFFICE_TAB".to_string(), st.id.clone()),
-            ("OFFICE_ISSUE".to_string(), note.id.clone()),
-            ("OFFICE_NOTE".to_string(), note.path.to_string_lossy().into_owned()),
+            ("SALASH_TAB".to_string(), st.id.clone()),
+            ("SALASH_ISSUE".to_string(), note.id.clone()),
+            ("SALASH_NOTE".to_string(), note.path.to_string_lossy().into_owned()),
         ];
         if let Ok(exe) = std::env::current_exe() {
-            env.push(("OFFICE_BIN".to_string(), exe.to_string_lossy().into_owned()));
+            env.push(("SALASH_BIN".to_string(), exe.to_string_lossy().into_owned()));
         }
         status::clear_status(&st.id);
         let result = Pane::spawn(&argv, &cwd, &env, rows, cols);
@@ -820,7 +820,7 @@ impl App {
         tab_id
     }
 
-    /// Open tabs asked for with `office tab new`, in the background.
+    /// Open tabs asked for with `salash tab new`, in the background.
     fn poll_requests(&mut self) {
         for (id, req) in api::take_requests() {
             let reply = match req {
@@ -847,7 +847,7 @@ impl App {
             return Reply::err("tab closed");
         };
         if t.pane.is_none() && !waiting {
-            return Reply::err("tab didn't start, see office");
+            return Reply::err("tab didn't start, see salash");
         }
         let name = t.st.name.clone();
         self.flash(format!("New tab \"{name}\" in {}", req.issue));
@@ -855,7 +855,7 @@ impl App {
     }
 
     /// Starting a Claude session on a To-do issue moves it to Active. Runs
-    /// before the pane spawns so OFFICE_NOTE points at the moved file.
+    /// before the pane spawns so SALASH_NOTE points at the moved file.
     fn start_work(&mut self, id: &str) {
         let Some(note) = self.selected_note().filter(|n| n.id == id && n.stage == Stage::Todo).cloned() else {
             return;
@@ -1750,7 +1750,7 @@ mod tests {
 
     #[test]
     fn resolve_dir_accepts_only_directories() {
-        let dir = std::env::temp_dir().join(format!("office-test-{}", uuid::Uuid::new_v4()));
+        let dir = std::env::temp_dir().join(format!("salash-test-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         let file = dir.join("file");
         std::fs::write(&file, "").unwrap();
@@ -1766,7 +1766,7 @@ mod tests {
 
     #[test]
     fn startup_asks_only_outside_the_default() {
-        let dir = std::env::temp_dir().join(format!("office-test-{}", uuid::Uuid::new_v4()));
+        let dir = std::env::temp_dir().join(format!("salash-test-{}", uuid::Uuid::new_v4()));
         let (a, b) = (dir.join("a"), dir.join("b"));
         std::fs::create_dir_all(&a).unwrap();
         std::fs::create_dir_all(&b).unwrap();
@@ -1787,7 +1787,7 @@ mod tests {
 
     #[test]
     fn a_deleted_default_falls_back_to_home() {
-        let dir = std::env::temp_dir().join(format!("office-test-{}", uuid::Uuid::new_v4()));
+        let dir = std::env::temp_dir().join(format!("salash-test-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         let home = PathBuf::from("/home");
 
@@ -1812,11 +1812,11 @@ mod tests {
         let mut rt = IssueRt::default();
         for i in 0..MAX_CLOSED + 2 {
             let mut st = tab(ClaudeStatus::Exited, 0, None).st;
-            st.id = format!("office-test-no-snapshot-{i}");
+            st.id = format!("salash-test-no-snapshot-{i}");
             rt.push_closed(st);
         }
         assert_eq!(rt.closed.len(), MAX_CLOSED);
-        assert_eq!(rt.closed[0].id, "office-test-no-snapshot-2");
+        assert_eq!(rt.closed[0].id, "salash-test-no-snapshot-2");
     }
 
     #[test]

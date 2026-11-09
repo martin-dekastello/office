@@ -51,10 +51,10 @@ pub fn run_script(command: &[String], repo: &Path, worktrees_dir: &Path, stem: &
         .arg(repo)
         .arg(stem)
         .current_dir(repo)
-        .env("OFFICE_REPO", repo)
-        .env("OFFICE_WORKTREE_NAME", stem)
-        .env("OFFICE_WORKTREES_DIR", worktrees_dir)
-        .env("OFFICE_ISSUE", issue)
+        .env("SALASH_REPO", repo)
+        .env("SALASH_WORKTREE_NAME", stem)
+        .env("SALASH_WORKTREES_DIR", worktrees_dir)
+        .env("SALASH_ISSUE", issue)
         .stdin(Stdio::null())
         .output()
         .with_context(|| format!("running {prog}"))?;
@@ -97,7 +97,7 @@ mod tests {
     }
 
     fn tmp(name: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!("office-wt-{name}-{}", std::process::id()));
+        let d = std::env::temp_dir().join(format!("salash-wt-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         d
@@ -107,7 +107,7 @@ mod tests {
     #[test]
     fn script_gets_repo_and_name_and_returns_last_line() {
         let d = tmp("ok");
-        let cmd = script(&d, r#"echo "making $2 from $1"; mkdir -p "$OFFICE_WORKTREES_DIR/$OFFICE_WORKTREE_NAME"; echo "$OFFICE_WORKTREES_DIR/$2""#);
+        let cmd = script(&d, r#"echo "making $2 from $1"; mkdir -p "$SALASH_WORKTREES_DIR/$SALASH_WORKTREE_NAME"; echo "$SALASH_WORKTREES_DIR/$2""#);
         let p = run_script(&cmd, &d, &d.join("wts"), "PROJ-1-fix-it", "PROJ-1").unwrap();
         assert_eq!(p, d.join("wts").join("PROJ-1-fix-it"));
     }

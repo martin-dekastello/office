@@ -23,7 +23,7 @@ use crossterm::event::{
 use crossterm::execute;
 
 #[derive(Parser)]
-#[command(name = "office", version, about = "Issues on the left, Claude Code tabs on the right, notes in Obsidian.")]
+#[command(name = "salash", version, about = "Issues on the left, Claude Code tabs on the right, notes in Obsidian.")]
 struct Cli {
     #[command(subcommand)]
     cmd: Option<Cmd>,
@@ -33,7 +33,7 @@ struct Cli {
 enum Cmd {
     /// Called by Claude Code hooks (reads the hook JSON on stdin).
     Hook,
-    /// Add office status hooks to ~/.claude/settings.json (only needed if inject_hooks = false).
+    /// Add salash status hooks to ~/.claude/settings.json (only needed if inject_hooks = false).
     InstallHooks,
     /// Create a local issue note.
     New { title: Vec<String> },
@@ -43,20 +43,20 @@ enum Cmd {
     List,
     /// Print config, data and notes paths.
     Paths,
-    /// Work with tabs of the running office.
+    /// Work with tabs of the running salash.
     Tab {
         #[command(subcommand)]
         cmd: TabCmd,
     },
-    /// Install the /new-office-tab Claude Code skill into ~/.claude/skills.
+    /// Install the /new-salash-tab Claude Code skill into ~/.claude/skills.
     InstallSkill,
 }
 
 #[derive(Subcommand)]
 enum TabCmd {
-    /// Open a tab in an issue of the running office, in the background.
+    /// Open a tab in an issue of the running salash, in the background.
     New {
-        /// Issue id; defaults to $OFFICE_ISSUE (set inside office tabs).
+        /// Issue id; defaults to $SALASH_ISSUE (set inside salash tabs).
         #[arg(long)]
         issue: Option<String>,
         #[arg(long, value_enum, default_value = "claude")]
@@ -83,7 +83,7 @@ enum TabKindArg {
     Notes,
 }
 
-const SKILL: &str = include_str!("../skills/new-office-tab/SKILL.md");
+const SKILL: &str = include_str!("../skills/new-salash-tab/SKILL.md");
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
@@ -147,8 +147,8 @@ fn main() -> Result<()> {
         }
         Some(Cmd::Tab { cmd: TabCmd::New { issue, kind, cwd, name, mode, prompt_file } }) => {
             let issue = issue
-                .or_else(|| std::env::var("OFFICE_ISSUE").ok())
-                .context("not inside an office tab: pass --issue")?;
+                .or_else(|| std::env::var("SALASH_ISSUE").ok())
+                .context("not inside a salash tab: pass --issue")?;
             let cwd = cwd
                 .map(|d| std::fs::canonicalize(config::expand(&d)).with_context(|| format!("not a directory: {}", d.display())))
                 .transpose()?;
@@ -169,7 +169,7 @@ fn main() -> Result<()> {
             Ok(())
         }
         Some(Cmd::InstallSkill) => {
-            let p = status::claude_dir().join("skills").join("new-office-tab").join("SKILL.md");
+            let p = status::claude_dir().join("skills").join("new-salash-tab").join("SKILL.md");
             std::fs::create_dir_all(p.parent().unwrap())?;
             std::fs::write(&p, SKILL)?;
             println!("Skill written to {}", p.display());

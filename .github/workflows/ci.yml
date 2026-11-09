@@ -17,7 +17,7 @@ jobs:
       - run: cargo build --release
       - uses: actions/upload-artifact@v4
         with:
-          name: office-${{ matrix.os }}
+          name: salash-${{ matrix.os }}
           path: |
-            target/release/office
-            target/release/office.exe
+            target/release/salash
+            target/release/salash.exe
