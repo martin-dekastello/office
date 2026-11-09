@@ -4,7 +4,7 @@ use crate::complete::{self, Completion};
 use crate::config::Config;
 use crate::keys;
 use crate::providers::{self, SyncReport};
-use crate::state::{self, IssueState, State, TabKind, TabState};
+use crate::state::{self, IssueState, SortMode, State, TabKind, TabState};
 use crate::status::{self, ClaudeStatus};
 use crate::term::{Pane, Snapshot};
 use crate::transcript;
@@ -141,6 +141,19 @@ pub struct IssueRt {
     pub creating: Option<WorktreeJob>,
     /// Why the worktree script last failed, until it's tried again.
     pub worktree_error: Option<String>,
+}
+
+/// How busy a tab keeps its issue, for the activity sort; higher first.
+/// `status` is the shown status of a Claude tab whose process runs.
+fn activity(kind: TabKind, status: Option<ClaudeStatus>) -> u8 {
+    match (kind, status) {
+        (TabKind::Claude, Some(ClaudeStatus::Attention)) => 5,
+        (TabKind::Claude, Some(ClaudeStatus::Working | ClaudeStatus::Starting)) => 4,
+        (TabKind::Claude, Some(ClaudeStatus::Done)) => 3,
+        (TabKind::Claude, _) => 2,
+        (TabKind::Shell, _) => 1,
+        (TabKind::Notes, _) => 0,
+    }
 }
 
 /// Where a tab that needs the issue's checkout starts.
@@ -363,8 +376,34 @@ impl App {
 
     // ---------- issues ----------
 
+    /// Issues of the current stage, in the chosen order. `notes` is newest-created
+    /// first, and the sorts are stable, so that breaks ties.
     pub fn visible(&self) -> Vec<&Note> {
-        self.notes.iter().filter(|n| n.stage == self.view).collect()
+        let mut v: Vec<&Note> = self.notes.iter().filter(|n| n.stage == self.view).collect();
+        match self.state.sort {
+            SortMode::Created => {}
+            SortMode::Name => v.sort_by_cached_key(|n| n.title.to_lowercase()),
+            SortMode::Moved => v.sort_by(|a, b| {
+                let since = |n: &Note| n.moved.clone().or_else(|| n.created.clone());
+                since(b).cmp(&since(a))
+            }),
+            SortMode::Activity => v.sort_by_cached_key(|n| std::cmp::Reverse(self.activity_of(&n.id))),
+        }
+        v
+    }
+
+    /// The most urgent activity among the issue's tabs. Tabs of an issue not
+    /// loaded yet have no process.
+    fn activity_of(&self, id: &str) -> u8 {
+        match self.rt.get(id) {
+            Some(rt) => rt
+                .tabs
+                .iter()
+                .map(|t| activity(t.st.kind, t.running().then(|| t.shown_status())))
+                .max(),
+            None => self.state.issues.get(id).and_then(|s| s.tabs.iter().map(|t| activity(t.kind, None)).max()),
+        }
+        .unwrap_or(0)
     }
 
     pub fn selected_note(&self) -> Option<&Note> {
@@ -1490,6 +1529,11 @@ impl App {
             KeyCode::Char('g') | KeyCode::Home => self.move_selection(-10_000),
             KeyCode::Char('G') | KeyCode::End => self.move_selection(10_000),
             KeyCode::Enter | KeyCode::Char('l') | KeyCode::Right => self.open_issue(),
+            KeyCode::Char('s') => {
+                self.state.sort = self.state.sort.next();
+                self.state.save();
+                self.flash(format!("Sort: {}", self.state.sort.label()));
+            }
             KeyCode::Char('0') => self.set_view(Stage::Todo),
             KeyCode::Char('1') => self.set_view(Stage::Active),
             KeyCode::Char('2') => self.set_view(Stage::Done),
@@ -1790,5 +1834,21 @@ mod tests {
         // Already resolved some other way.
         let mut t = tab(ClaudeStatus::Done, 100, Some(1000));
         assert!(!t.take_interrupt(9000));
+    }
+
+    #[test]
+    fn the_most_urgent_tab_ranks_the_issue() {
+        use ClaudeStatus::*;
+        let level = |tabs: &[(TabKind, Option<ClaudeStatus>)]| tabs.iter().map(|(k, s)| activity(*k, *s)).max().unwrap_or(0);
+        let busy = level(&[(TabKind::Shell, None), (TabKind::Claude, Some(Idle)), (TabKind::Claude, Some(Working))]);
+        let done = level(&[(TabKind::Claude, Some(Done))]);
+        let idle = level(&[(TabKind::Claude, Some(Idle)), (TabKind::Shell, None)]);
+        let shell = level(&[(TabKind::Shell, None), (TabKind::Notes, None)]);
+        assert!(level(&[(TabKind::Claude, Some(Attention))]) > busy);
+        assert!(busy > done && done > idle && idle > shell && shell > level(&[]));
+        // A suspended session counts as an inactive Claude, as does one that exited.
+        assert_eq!(activity(TabKind::Claude, None), idle);
+        assert_eq!(activity(TabKind::Claude, Some(Exited)), idle);
+        assert_eq!(level(&[(TabKind::Notes, None)]), 0);
     }
 }

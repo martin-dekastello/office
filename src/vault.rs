@@ -59,6 +59,13 @@ pub struct Note {
     /// Explicit local repo path from frontmatter (`repo_path:`), editable in Obsidian.
     pub repo_path: Option<PathBuf>,
     pub created: Option<String>,
+    /// When the note entered its current stage (`moved:`); older notes don't have it.
+    pub moved: Option<String>,
+}
+
+/// Value of `moved:`, a local date-time Obsidian shows as a date property.
+fn now_stamp() -> String {
+    chrono::Local::now().format("%Y-%m-%dT%H:%M:%S").to_string()
 }
 
 impl Note {
@@ -240,6 +247,7 @@ impl Vault {
             repo: fm.get("repo").cloned(),
             repo_path: fm.get("repo_path").map(|p| crate::config::expand(Path::new(p))),
             created: fm.get("created").cloned(),
+            moved: fm.get("moved").cloned(),
         })
     }
 
@@ -294,7 +302,7 @@ impl Vault {
         if let Some(r) = n.repo {
             fm.push_str(&format!("repo: {}\n", yaml_str(r)));
         }
-        fm.push_str(&format!("created: {today}\ntags:\n  - issue\n---\n"));
+        fm.push_str(&format!("created: {today}\nmoved: {}\ntags:\n  - issue\n---\n", now_stamp()));
         let link = n
             .url
             .map(|u| format!("\n[Open {} issue]({})\n", n.source, u))
@@ -322,11 +330,14 @@ impl Vault {
         }
         let text = fs::read_to_string(&note.path)?;
         let text = set_frontmatter_key(&text, "status", stage.dir());
+        let moved = now_stamp();
+        let text = set_frontmatter_key(&text, "moved", &moved);
         fs::write(&note.path, text)?;
         fs::rename(&note.path, &dest)?;
         let mut n = note.clone();
         n.path = dest;
         n.stage = stage;
+        n.moved = Some(moved);
         Ok(n)
     }
 
@@ -395,8 +406,10 @@ mod tests {
             .unwrap();
         assert!(!again);
         assert_eq!(v.find("GH-7").unwrap().stage, Stage::Todo);
+        assert!(n.moved.is_some());
         let n = v.move_to(&n, Stage::Active).unwrap();
         assert!(n.path.ends_with("active/GH-7-mapa-dlazdic.md"));
+        assert_eq!(v.find("GH-7").unwrap().moved, n.moved);
         let d = v.move_to(&n, Stage::Done).unwrap();
         assert!(d.path.ends_with("done/GH-7-mapa-dlazdic.md"));
         assert_eq!(v.find("GH-7").unwrap().stage, Stage::Done);

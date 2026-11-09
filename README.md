@@ -21,7 +21,12 @@ Issues on the left, Claude Code tabs on the right, one Obsidian note per issue.
   The status of the most urgent tab also shows on the issue in the sidebar.
   The terminal bell rings when a background tab needs you.
 - **Notes live in Obsidian**: `<vault>/<notes_dir>/{todo,active,done,archive}/<id>-<slug>.md`,
-  one file per issue. Moving an issue to another stage moves the file and updates `status:`.
+  one file per issue. Moving an issue to another stage moves the file and updates `status:`
+  and `moved:`.
+- **Sorting.** `s` cycles the issue list between newest created (the default), name, most
+  recently moved to its stage, and activity. Activity puts an issue whose Claude needs you
+  first, then working, then done (not seen yet), then idle or suspended Claude, then shells
+  only, then everything else. Each issue ranks by its most urgent tab.
 - **To-do vs Active.** New issues, synced or local, land in To-do. Active is what you're working
   on: move an issue there with `u`, or start a Claude session on a To-do issue and it moves
   there itself. Office never moves an issue because its GitHub or Jira status changed.
@@ -126,6 +131,7 @@ to the terminal.
 | `j`/`k` | select issue |
 | `⏎` | open issue: start or resume its active tab |
 | `0` `1` `2` `3` / `h` | view To-do / Active / Done / Archive |
+| `s` | sort by created / name / moved / activity |
 | `c` `t` `e` | new Claude / shell / note-editor tab |
 | `z` / `R` | suspend Claude tab / reopen closed Claude tab |
 | `C` | new Claude tab in a directory you type (`Tab` completes, empty = issue default) |

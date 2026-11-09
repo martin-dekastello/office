@@ -1,6 +1,6 @@
 use crate::app::{App, ConfirmKind, Focus, IssueRt, Mode, PromptKind, Tab};
 use crate::complete::Completion;
-use crate::state::TabKind;
+use crate::state::{SortMode, TabKind};
 use crate::status::ClaudeStatus;
 use crate::term::Snapshot;
 use crate::vault::Stage;
@@ -131,11 +131,22 @@ fn draw_sidebar(app: &mut App, f: &mut Frame, area: Rect) {
     if attention > 0 {
         h.push(Span::styled(format!("  ● {attention}"), Style::new().fg(AMBER).add_modifier(Modifier::BOLD)));
     }
+    let head_used: usize = h.iter().map(Span::width).sum();
     f.render_widget(Paragraph::new(Line::from(h)), head);
 
     let quit_w = 6.min(head.width);
     app.quit_hit = Rect { x: head.right() - quit_w, width: quit_w, ..head };
     f.render_widget(Paragraph::new(Span::styled(" quit ", Style::new().fg(FG_DIM))), app.quit_hit);
+
+    // The sort, unless it's the default; dropped when the header is full.
+    if app.state.sort != SortMode::Created {
+        let label = format!("↕ {} ", app.state.sort.label());
+        let lw = label.chars().count() as u16;
+        if head_used as u16 + lw < head.width - quit_w {
+            let r = Rect { x: app.quit_hit.x - lw, width: lw, ..head };
+            f.render_widget(Paragraph::new(Span::styled(label, Style::new().fg(FG_DIM))), r);
+        }
+    }
 
     let full: usize = Stage::ALL.iter().map(|s| s.label().len() + app.count(*s).to_string().len() + 3).sum();
     let short = full + 1 > stages.width as usize;
@@ -477,6 +488,7 @@ fn draw_help(app: &App, f: &mut Frame, area: Rect) {
         ("j/k ↑/↓".into(), "select issue"),
         ("⏎ / l".into(), "open issue (start/resume active tab)"),
         ("0/1/2/3, h/v".into(), "view To-do / Active / Done / Archive"),
+        ("s".into(), "sort by created / name / moved / activity"),
         ("Tab / Esc".into(), "back to terminal"),
         ("x / q".into(), "close tab / quit"),
         ("".into(), ""),
