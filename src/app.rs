@@ -178,6 +178,16 @@ impl IssueRt {
             .max_by_key(|s| s.urgency())
     }
 
+    /// Take a tab out, keeping the same tab active unless it was this one.
+    fn remove_tab(&mut self, idx: usize) -> Tab {
+        let t = self.tabs.remove(idx);
+        if idx < self.active {
+            self.active -= 1;
+        }
+        self.active = self.active.min(self.tabs.len().saturating_sub(1));
+        t
+    }
+
     /// Remember a closed tab, forgetting the oldest beyond MAX_CLOSED.
     fn push_closed(&mut self, st: TabState) {
         self.closed.push(st);
@@ -947,11 +957,18 @@ impl App {
 
     fn close_tab(&mut self) {
         let Some(id) = self.selected.clone() else { return };
-        let rt = self.rt_for(&id);
-        if rt.tabs.is_empty() {
-            return;
+        let idx = self.rt_for(&id).active;
+        self.close_tab_at(&id, idx);
+    }
+
+    /// Close a tab. A Claude session that can be resumed is kept for `R`.
+    /// Returns whether it was.
+    fn close_tab_at(&mut self, id: &str, idx: usize) -> bool {
+        let rt = self.rt_for(id);
+        if idx >= rt.tabs.len() {
+            return false;
         }
-        let mut t = rt.tabs.remove(rt.active);
+        let mut t = rt.remove_tab(idx);
         let reopenable = t.st.kind == TabKind::Claude && t.resumable();
         if reopenable {
             t.save_screen();
@@ -965,11 +982,11 @@ impl App {
         } else {
             state::remove_snapshot(&t.st.id);
         }
-        rt.active = rt.active.min(rt.tabs.len().saturating_sub(1));
-        if rt.tabs.is_empty() {
+        if rt.tabs.is_empty() && self.selected.as_deref() == Some(id) {
             self.focus = Focus::Sidebar;
         }
-        self.persist(&id);
+        self.persist(id);
+        reopenable
     }
 
     /// Bring back the most recently closed Claude tab, still suspended.
@@ -1121,7 +1138,9 @@ impl App {
         let selected = self.selected.clone();
         let mut new_sessions: Vec<(String, String, String)> = vec![];
         let mut renamed: Vec<String> = vec![];
-        let mut stopped: Vec<(String, usize)> = vec![];
+        // Tabs whose process exited, to close. As in tmux with `remain-on-exit`
+        // off, only a Claude that failed to start stays, to show why.
+        let mut ended: Vec<(String, usize)> = vec![];
         for (issue, rt) in self.rt.iter_mut() {
             let active = rt.active;
             for (i, t) in rt.tabs.iter_mut().enumerate() {
@@ -1141,7 +1160,9 @@ impl App {
                     }
                 }
                 if exited {
-                    if claude && !was_exited {
+                    if !claude && !was_exited {
+                        ended.push((issue.clone(), i));
+                    } else if claude && !was_exited {
                         t.exit_check = Some(t.status == ClaudeStatus::Starting);
                     } else if let Some(no_hooks) = t.exit_check.take() {
                         // A poll later, so the reader has the last of the output.
@@ -1153,8 +1174,9 @@ impl App {
                         if !t.resumable() {
                             t.st.claude_session = None;
                             renamed.push(issue.clone());
-                        } else if !no_hooks || hint.is_some() {
-                            stopped.push((issue.clone(), i));
+                        }
+                        if !no_hooks || hint.is_some() {
+                            ended.push((issue.clone(), i));
                         }
                     }
                     t.status = ClaudeStatus::Exited;
@@ -1189,13 +1211,17 @@ impl App {
             }
             self.persist(&issue);
         }
-        for (issue, idx) in stopped {
-            self.park(&issue, idx);
-        }
         renamed.sort();
         renamed.dedup();
         for issue in renamed {
             self.persist(&issue);
+        }
+        // Highest index first, so the ones still to close keep theirs.
+        ended.sort_by_key(|e| std::cmp::Reverse(e.1));
+        for (issue, idx) in ended {
+            if self.close_tab_at(&issue, idx) && selected.as_deref() == Some(issue.as_str()) {
+                self.flash("Claude exited, tab closed: R reopens it".into());
+            }
         }
     }
 
@@ -1817,6 +1843,36 @@ mod tests {
         }
         assert_eq!(rt.closed.len(), MAX_CLOSED);
         assert_eq!(rt.closed[0].id, "salash-test-no-snapshot-2");
+    }
+
+    #[test]
+    fn removing_a_tab_keeps_the_active_one() {
+        let rt_with = |active| {
+            let mut rt = IssueRt::default();
+            for i in 0..3 {
+                let mut t = tab(ClaudeStatus::Exited, 0, None);
+                t.st.id = i.to_string();
+                rt.tabs.push(t);
+            }
+            rt.active = active;
+            rt
+        };
+        let active = |rt: &IssueRt| rt.tabs[rt.active].st.id.clone();
+
+        let mut rt = rt_with(2);
+        rt.remove_tab(0);
+        assert_eq!(active(&rt), "2");
+        let mut rt = rt_with(0);
+        rt.remove_tab(2);
+        assert_eq!(active(&rt), "0");
+        // The active one itself: the next tab, or the one before the last.
+        let mut rt = rt_with(1);
+        rt.remove_tab(1);
+        assert_eq!(active(&rt), "2");
+        rt.remove_tab(1);
+        assert_eq!(active(&rt), "0");
+        rt.remove_tab(0);
+        assert_eq!(rt.active, 0);
     }
 
     #[test]
