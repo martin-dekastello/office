@@ -39,9 +39,11 @@ The name comes from the Slovak word *salaš*, a shepherd's hut up in the mountai
   with `worktree_command`.
 - **Sessions can be stopped and picked up again.** Press `z` to suspend an inactive Claude
   tab: its process stops and its RAM is freed, but you can still scroll its saved screen,
-  and `⏎` continues it with `claude --resume <session>`. A Claude tab that exits or was
-  running when you quit salash ends up the same way. Closing one with `x` keeps it too:
-  `R` reopens it.
+  and `⏎` continues it with `claude --resume <session>`. A Claude tab that was running when
+  you quit salash ends up the same way. Closing one with `x` keeps it too: `R` reopens it.
+- **Tabs close when their process exits**: quit Claude, `exit` a shell or close the note's
+  editor and the tab goes away. A Claude session that exits can still be brought back with
+  `R`. Only a Claude that fails to start stays open, so you can read why.
 - **GitHub (via `gh`) + Jira Cloud + local issues**, behind one `Provider` trait.
 - **Cross-platform**: macOS, Linux, Windows (ConPTY). It's a single binary with its own
   terminal emulation, so it doesn't need tmux.
