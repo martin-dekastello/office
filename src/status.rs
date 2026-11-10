@@ -1,7 +1,7 @@
 //! Claude status tracking via Claude Code hooks.
 //!
-//! Each tab is spawned with OFFICE_TAB=<tab id>. Claude Code runs
-//! `office hook` on lifecycle events; the hook writes
+//! Each tab is spawned with SALASH_TAB=<tab id>. Claude Code runs
+//! `salash hook` on lifecycle events; the hook writes
 //! <data>/status/<tab id>.json, which the UI polls.
 
 use anyhow::{Context, Result};
@@ -103,10 +103,10 @@ pub fn map_event(payload: &Value, prev: Option<ClaudeStatus>) -> Option<ClaudeSt
     }
 }
 
-/// `office hook`: called by Claude Code. Never fails loudly, so a global
-/// hook install can't break claude sessions started outside office.
+/// `salash hook`: called by Claude Code. Never fails loudly, so a global
+/// hook install can't break claude sessions started outside salash.
 pub fn run_hook() -> Result<()> {
-    let Ok(tab) = std::env::var("OFFICE_TAB") else { return Ok(()) };
+    let Ok(tab) = std::env::var("SALASH_TAB") else { return Ok(()) };
     let mut input = String::new();
     let _ = std::io::stdin().read_to_string(&mut input);
     let payload: Value = serde_json::from_str(&input).unwrap_or(Value::Null);
@@ -163,7 +163,7 @@ const EVENTS: &[(&str, bool)] = &[
 ];
 
 fn hook_command() -> Result<String> {
-    let exe = std::env::current_exe().context("locating office executable")?;
+    let exe = std::env::current_exe().context("locating salash executable")?;
     Ok(format!("\"{}\" hook", exe.display()))
 }
 
@@ -199,13 +199,13 @@ fn claude_settings_path() -> PathBuf {
     claude_dir().join("settings.json")
 }
 
-/// `office install-hooks`: merge hooks into ~/.claude/settings.json
+/// `salash install-hooks`: merge hooks into ~/.claude/settings.json
 /// (fallback for setups where `--settings` injection is disabled).
 pub fn install_global() -> Result<PathBuf> {
     let path = claude_settings_path();
     let mut root: Value = if path.exists() {
         let text = std::fs::read_to_string(&path)?;
-        std::fs::write(path.with_extension("json.office-backup"), &text)?;
+        std::fs::write(path.with_extension("json.salash-backup"), &text)?;
         serde_json::from_str(&text).with_context(|| format!("parsing {}", path.display()))?
     } else {
         json!({})
@@ -221,7 +221,7 @@ pub fn install_global() -> Result<PathBuf> {
         let already = arr.iter().any(|e| {
             e.get("hooks")
                 .and_then(Value::as_array)
-                .map(|hs| hs.iter().any(|h| h.get("command").and_then(Value::as_str).is_some_and(|c| c.ends_with("office\" hook") || c == cmd)))
+                .map(|hs| hs.iter().any(|h| h.get("command").and_then(Value::as_str).is_some_and(|c| c.ends_with("salash\" hook") || c == cmd)))
                 .unwrap_or(false)
         });
         if !already {

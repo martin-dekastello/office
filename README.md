@@ -1,9 +1,11 @@
-# office
+# salash
 
 Issues on the left, Claude Code tabs on the right, one Obsidian note per issue.
 
+The name comes from the Slovak word *salaš*, a shepherd's hut up in the mountain pastures.
+
 ```
- office  ● 1                            │ ✳ 1:Refactor tile cache   ● 2:Fix loader   $ 3:shell
+ salash  ● 1                            │ ✳ 1:Refactor tile cache   ● 2:Fix loader   $ 3:shell
   To-do 5  Active 3  Done 1  Archive 0  │
                                         │  (live Claude Code session for the selected issue)
  ✳ TS-42                             3▤ │
@@ -29,7 +31,7 @@ Issues on the left, Claude Code tabs on the right, one Obsidian note per issue.
   only, then everything else. Each issue ranks by its most urgent tab.
 - **To-do vs Active.** New issues, synced or local, land in To-do. Active is what you're working
   on: move an issue there with `u`, or start a Claude session on a To-do issue and it moves
-  there itself. Office never moves an issue because its GitHub or Jira status changed.
+  there itself. Salash never moves an issue because its GitHub or Jira status changed.
   Each new Claude session is logged under `## Sessions` with its `claude --resume <id>` command.
 - **One git worktree + branch per issue** (`<worktrees_dir>/<repo>/<id>-<slug>`), so all
   tabs of an issue share one checkout. It's created when the issue's first Claude or shell tab
@@ -38,7 +40,7 @@ Issues on the left, Claude Code tabs on the right, one Obsidian note per issue.
 - **Sessions can be stopped and picked up again.** Press `z` to suspend an inactive Claude
   tab: its process stops and its RAM is freed, but you can still scroll its saved screen,
   and `⏎` continues it with `claude --resume <session>`. A Claude tab that exits or was
-  running when you quit office ends up the same way. Closing one with `x` keeps it too:
+  running when you quit salash ends up the same way. Closing one with `x` keeps it too:
   `R` reopens it.
 - **GitHub (via `gh`) + Jira Cloud + local issues**, behind one `Provider` trait.
 - **Cross-platform**: macOS, Linux, Windows (ConPTY). It's a single binary with its own
@@ -48,8 +50,8 @@ Issues on the left, Claude Code tabs on the right, one Obsidian note per issue.
 
 ```sh
 cargo install --path .
-office               # first run writes the config and prints its path
-office paths         # where config, data, notes and worktrees live
+salash               # first run writes the config and prints its path
+salash paths         # where config, data, notes and worktrees live
 ```
 
 Requirements: `claude` on PATH, `git` for worktrees, `gh` (logged in) for GitHub sources,
@@ -57,8 +59,8 @@ Requirements: `claude` on PATH, `git` for worktrees, `gh` (logged in) for GitHub
 
 ## Config
 
-`~/.config/office/config.toml` on Linux, `~/Library/Application Support/office/config.toml`
-on macOS, `%APPDATA%\office\config.toml` on Windows. Override with `$OFFICE_CONFIG`.
+`~/.config/salash/config.toml` on Linux, `~/Library/Application Support/salash/config.toml`
+on macOS, `%APPDATA%\salash\config.toml` on Windows. Override with `$SALASH_CONFIG`.
 
 ```toml
 vault = "~/Documents/Obsidian"
@@ -88,16 +90,16 @@ If a plain `git worktree add` isn't how you set up a checkout, set `worktree_com
 worktree_command = ["~/bin/make-worktree.sh"]
 ```
 
-office runs it as `make-worktree.sh <repo> <id>-<slug>` (e.g. `~/code/backend PROJ-118-fix-oauth-login-loop`)
+salash runs it as `make-worktree.sh <repo> <id>-<slug>` (e.g. `~/code/backend PROJ-118-fix-oauth-login-loop`)
 from inside the repo, the first time an issue's Claude or shell tab opens. The second argument
-works as a folder or branch name as is. `OFFICE_REPO`, `OFFICE_WORKTREE_NAME`,
-`OFFICE_WORKTREES_DIR` and `OFFICE_ISSUE` hold the same and more. The script must print the
+works as a folder or branch name as is. `SALASH_REPO`, `SALASH_WORKTREE_NAME`,
+`SALASH_WORKTREES_DIR` and `SALASH_ISSUE` hold the same and more. The script must print the
 worktree's path as its **last line of output** (a relative path is taken from the repo). Send
-anything else to stderr. office remembers the path and runs the script again only if that
+anything else to stderr. salash remembers the path and runs the script again only if that
 directory disappears.
 
 It runs in the background and the tab shows a spinner until it's done. If it exits non-zero or
-prints a path that doesn't exist, the tab shows its error output and `⏎` runs it again. office
+prints a path that doesn't exist, the tab shows its error output and `⏎` runs it again. salash
 doesn't fall back to the repo as it does when plain `git worktree add` fails.
 
 ```sh
@@ -116,7 +118,7 @@ them (`Shift-Tab` goes back, `/` enters the selected folder). The tab keeps that
 when it restarts or resumes, and no worktree is created for it.
 
 Issues with no repo start their tabs in the default directory, which is your home directory
-until you change it. Press `p` to set it, in the same dialog as `C`. If you start office
+until you change it. Press `p` to set it, in the same dialog as `C`. If you start salash
 somewhere else, it offers to make that directory the default: `⏎` accepts, `Esc` keeps the
 current one, and it asks again next time. A tab keeps the directory it started in, so changing
 the default only affects new tabs and sessions always resume where they began.
@@ -160,7 +162,7 @@ The mouse is captured so you can click issues, tabs, the To-do/Active/Done/Archi
 a tab's `×` to close it, and `quit` at the top of the sidebar. Closing and quitting ask first. Inside a tab, the wheel, clicks and
 drags go to the app when it handles the mouse itself, as Claude Code does with
 `"tui": "fullscreen"`. Apps on the alternate screen that don't (`less`) get arrow keys from
-the wheel. Anything else scrolls office's scrollback.
+the wheel. Anything else scrolls salash's scrollback.
 
 In a shell tab, drag to select text. Letting go copies it, and the highlight stays until you
 click or type. Hold the mouse above or below the tab to scroll while selecting. Copying uses
@@ -170,49 +172,49 @@ select text.
 
 ## How the Claude status works
 
-Each tab is started with `OFFICE_TAB=<uuid>`. Claude tabs are launched as
-`claude --settings <data>/claude-hooks.json`. That file registers `office hook` for
+Each tab is started with `SALASH_TAB=<uuid>`. Claude tabs are launched as
+`claude --settings <data>/claude-hooks.json`. That file registers `salash hook` for
 `SessionStart`, `UserPromptSubmit`, `Pre/PostToolUse`, `PermissionRequest`,
 `Notification`, `Stop` and `SessionEnd`. The hook writes `<data>/status/<uuid>.json`
-and the UI polls it. The hook does nothing when `OFFICE_TAB` isn't set, so it's safe to
+and the UI polls it. The hook does nothing when `SALASH_TAB` isn't set, so it's safe to
 install globally. If you'd rather not use `--settings`, set `inject_hooks = false` and run
-`office install-hooks`. That merges the hooks into `~/.claude/settings.json` and writes
+`salash install-hooks`. That merges the hooks into `~/.claude/settings.json` and writes
 a backup first.
 
-Every tab also gets `OFFICE_ISSUE`, `OFFICE_NOTE` (the note's path) and `OFFICE_BIN` (the
-office executable). You can tell Claude "append a summary to $OFFICE_NOTE".
+Every tab also gets `SALASH_ISSUE`, `SALASH_NOTE` (the note's path) and `SALASH_BIN` (the
+salash executable). You can tell Claude "append a summary to $SALASH_NOTE".
 
 ## Opening tabs from Claude
 
-`office tab new` opens a tab in an issue of the running office. The tab opens in the
+`salash tab new` opens a tab in an issue of the running salash. The tab opens in the
 background, so whatever you're looking at stays on screen. Inside a tab, the issue defaults
-to `$OFFICE_ISSUE`:
+to `$SALASH_ISSUE`:
 
 ```sh
-office tab new --mode plan --name probe --cwd ~/code/other --prompt-file brief.md
-office tab new --kind shell
+salash tab new --mode plan --name probe --cwd ~/code/other --prompt-file brief.md
+salash tab new --kind shell
 ```
 
 `--mode` and `--prompt-file` apply only to the first launch. A suspended or restarted tab
 resumes its session as usual and never gets the prompt again. The command waits up to 5s
-for office to answer and fails if office isn't running.
+for salash to answer and fails if salash isn't running.
 
-`office install-skill` adds the `/new-office-tab` skill to `~/.claude/skills` (or
-`$CLAUDE_CONFIG_DIR`). In a Claude tab, `/new-office-tab plan <task>` writes a handoff brief
+`salash install-skill` adds the `/new-salash-tab` skill to `~/.claude/skills` (or
+`$CLAUDE_CONFIG_DIR`). In a Claude tab, `/new-salash-tab plan <task>` writes a handoff brief
 from the conversation and opens a new Claude tab in the same issue, started in that mode
 with the brief as its first prompt. It's like `/new-claude-tmux`, but without tmux.
 
 ## CLI
 
 ```
-office                 # TUI
-office new <title>     # create a local issue note
-office sync            # pull GitHub/Jira issues and create missing notes in todo/
-office list
-office install-hooks
-office tab new [--issue ID] [--kind claude|shell|notes] [--cwd DIR] [--name NAME]
-               [--mode MODE] [--prompt-file FILE]   # open a tab in the running office
-office install-skill   # add /new-office-tab to ~/.claude/skills
+salash                 # TUI
+salash new <title>     # create a local issue note
+salash sync            # pull GitHub/Jira issues and create missing notes in todo/
+salash list
+salash install-hooks
+salash tab new [--issue ID] [--kind claude|shell|notes] [--cwd DIR] [--name NAME]
+               [--mode MODE] [--prompt-file FILE]   # open a tab in the running salash
+salash install-skill   # add /new-salash-tab to ~/.claude/skills
 ```
 
 ## Layout
@@ -227,7 +229,7 @@ src/
   vault.rs      Obsidian notes (todo/active/done/archive), slugs, frontmatter
   providers.rs  GitHub (gh), Jira REST v3
   status.rs     Claude Code hook handler and settings
-  api.rs        `office tab new` requests to the running UI
+  api.rs        `salash tab new` requests to the running UI
   worktree.rs   per-issue git worktrees
   state.rs      persisted tabs, session IDs and saved screens
   transcript.rs conversation text from Claude's transcript, for saved screens

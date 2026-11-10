@@ -1,4 +1,4 @@
-# office
+# salash
 
 A terminal app: issues on the left, Claude Code tabs on the right, one Obsidian note per issue.
 See README.md for features and config.

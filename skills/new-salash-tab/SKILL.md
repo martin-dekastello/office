@@ -1,19 +1,19 @@
 ---
-name: new-office-tab
-description: Open a new Claude Code tab in the same office issue, seeded with a handoff brief of the relevant context from this conversation and started in a chosen permission mode (plan, auto, acceptEdits, manual, dontAsk, bypass). Use when the user says "/new-office-tab plan …", "spin off a new claude tab for …", or wants to hand a task to a parallel session while running inside office.
+name: new-salash-tab
+description: Open a new Claude Code tab in the same salash issue, seeded with a handoff brief of the relevant context from this conversation and started in a chosen permission mode (plan, auto, acceptEdits, manual, dontAsk, bypass). Use when the user says "/new-salash-tab plan …", "spin off a new claude tab for …", or wants to hand a task to a parallel session while running inside salash.
 ---
 
-# Spin off a new Claude tab in office
+# Spin off a new Claude tab in salash
 
-`/new-office-tab [mode] <task…>` opens a new Claude tab in the office issue this session
+`/new-salash-tab [mode] <task…>` opens a new Claude tab in the salash issue this session
 belongs to. The tab runs in the given permission mode, and its first prompt is a handoff
 brief: the relevant context from this conversation plus the task. You are the *calling*
 session. The new one starts with no context, so the brief is everything it knows. The tab
 opens in the background, so the user stays where they are.
 
-## 1. Check you're inside office
+## 1. Check you're inside salash
 
-Run `echo "$OFFICE_ISSUE"`. If it's empty, this session isn't running in an office tab.
+Run `echo "$SALASH_ISSUE"`. If it's empty, this session isn't running in a salash tab.
 Tell the user so, suggest `/new-claude-tmux`, and stop.
 
 ## 2. Parse mode and task
@@ -44,7 +44,7 @@ equally plausible, ask the user one short question. Gather repo state from *that
 
 ## 4. Write the handoff brief
 
-Write it to `${TMPDIR:-/tmp}/new-office-tab/<YYYYmmdd-HHMMSS>-<slug>.md`, creating the
+Write it to `${TMPDIR:-/tmp}/new-salash-tab/<YYYYmmdd-HHMMSS>-<slug>.md`, creating the
 directory if needed. From this conversation, distil only what the new task needs:
 
 ```markdown
@@ -56,8 +56,8 @@ directory if needed. From this conversation, distil only what the new task needs
 <one-line restatement of what done looks like>
 
 ## Where things stand
-You are running in `<path>` on branch `<branch>`, in a tab of office issue `<$OFFICE_ISSUE>`.
-The issue's note is `$OFFICE_NOTE`.
+You are running in `<path>` on branch `<branch>`, in a tab of salash issue `<$SALASH_ISSUE>`.
+The issue's note is `$SALASH_NOTE`.
 <git status summary; relevant recent commits>
 
 ## Relevant context
@@ -83,14 +83,14 @@ Rules:
 ## 5. Open the tab
 
 ```sh
-"${OFFICE_BIN:-office}" tab new --issue "$OFFICE_ISSUE" --mode <mode> --name <name> \
+"${SALASH_BIN:-salash}" tab new --issue "$SALASH_ISSUE" --mode <mode> --name <name> \
   --cwd <path> --prompt-file <brief-file>
 ```
 
 `<name>` is a short kebab-case slug of the task, 24 characters at most. It names both the tab
-and the Claude session. office validates the mode and directory, and it passes the brief to
+and the Claude session. salash validates the mode and directory, and it passes the brief to
 Claude as one argument, with no shell in between. On success the command prints
-`tab:<id> issue:<id>`. On failure it prints the reason, such as "office doesn't seem to be
+`tab:<id> issue:<id>`. On failure it prints the reason, such as "salash doesn't seem to be
 running". Report that to the user and don't retry with a different mechanism.
 
 ## 6. Report
