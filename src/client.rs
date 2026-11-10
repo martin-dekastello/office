@@ -1,4 +1,4 @@
-//! `office` in your terminal: it starts the folder's server if needed, then
+//! `salash` in your terminal: it starts the folder's server if needed, then
 //! passes your keys and mouse to it and prints what it draws. Copying and
 //! opening links happen here, on your side of any ssh connection.
 
@@ -26,13 +26,13 @@ fn connect(inst: &Instance) -> Result<Stream> {
     Ok(Stream::connect(inst.socket_name()?)?)
 }
 
-/// `office [folder]`: start the folder's office in the background and attach.
+/// `salash [folder]`: start the folder's salash in the background and attach.
 pub fn start(inst: &Instance) -> Result<()> {
     #[cfg(unix)]
     inst.check_socket()?;
     if connect(inst).is_ok() {
         bail!(
-            "office is already running in {f}\nattach with: office --attach {f}",
+            "salash is already running in {f}\nattach with: salash --attach {f}",
             f = inst.folder.display()
         );
     }
@@ -47,20 +47,20 @@ pub fn start(inst: &Instance) -> Result<()> {
                 let log = std::fs::read_to_string(inst.log_path()).unwrap_or_default();
                 let lines: Vec<&str> = log.lines().collect();
                 let tail = lines[lines.len().saturating_sub(10)..].join("\n");
-                bail!("office didn't start in {}:\n{tail}", inst.folder.display());
+                bail!("salash didn't start in {}:\n{tail}", inst.folder.display());
             }
         }
     };
     run(inst, conn)
 }
 
-/// `office --attach [folder]`: join the folder's running office.
+/// `salash --attach [folder]`: join the folder's running salash.
 pub fn attach(inst: &Instance) -> Result<()> {
     #[cfg(unix)]
     inst.check_socket()?;
     let conn = connect(inst).map_err(|_| {
         anyhow::anyhow!(
-            "no office running in {f}\nstart it with: office {f}",
+            "no salash running in {f}\nstart it with: salash {f}",
             f = inst.folder.display()
         )
     })?;
@@ -85,15 +85,15 @@ fn run(inst: &Instance, conn: Stream) -> Result<()> {
     let (recv, send) = (Conn(conn.clone()), Conn(conn));
     let mut recv = BufReader::new(recv);
     // The server says how to set up the terminal before drawing anything.
-    let mouse = match ServerMsg::read(&mut recv).context("talking to office")? {
+    let mouse = match ServerMsg::read(&mut recv).context("talking to salash")? {
         Some(ServerMsg::Welcome { version, mouse }) if version == VERSION => mouse,
         Some(ServerMsg::Welcome { .. }) => bail!(
-            "office in {} is another version than this one\nstop it with: kill $(cat {}), then start it again",
+            "salash in {} is another version than this one\nstop it with: kill $(cat {}), then start it again",
             inst.folder.display(),
             inst.lock_path().display()
         ),
         Some(ServerMsg::Exit(why)) => bail!("{why}"),
-        _ => bail!("office sent something unexpected"),
+        _ => bail!("salash sent something unexpected"),
     };
 
     terminal::enable_raw_mode()?;
@@ -117,7 +117,7 @@ fn run(inst: &Instance, conn: Stream) -> Result<()> {
     let mut send = BufWriter::new(send);
     if let Err(e) = ClientMsg::Event(Event::Resize(cols, rows)).write(&mut send) {
         restore(mouse, keyboard);
-        return Err(e).context("talking to office");
+        return Err(e).context("talking to salash");
     }
     // Input goes on its own thread; it ends with the process.
     std::thread::spawn(move || {
@@ -144,7 +144,7 @@ fn run(inst: &Instance, conn: Stream) -> Result<()> {
             }
             Ok(Some(ServerMsg::Exit(why))) => break why,
             Ok(Some(ServerMsg::Welcome { .. })) => {}
-            Ok(None) | Err(_) => break "office stopped".into(),
+            Ok(None) | Err(_) => break "salash stopped".into(),
         }
     };
     restore(mouse, keyboard);
@@ -152,7 +152,7 @@ fn run(inst: &Instance, conn: Stream) -> Result<()> {
     Ok(())
 }
 
-/// Links office opens: web pages for issues and notes in Obsidian. Not files,
+/// Links salash opens: web pages for issues and notes in Obsidian. Not files,
 /// apps or other schemes, whatever the server asks for.
 fn openable(url: &str) -> bool {
     let scheme = url.split_once("://").map(|(s, _)| s.to_ascii_lowercase());

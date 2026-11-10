@@ -240,7 +240,7 @@ pub enum Mode {
 
 pub struct App {
     pub cfg: Config,
-    /// The folder this office runs in: where tabs on issues with no repo start.
+    /// The folder this salash runs in: where tabs on issues with no repo start.
     pub folder: PathBuf,
     pub vault: Vault,
     pub notes: Vec<Note>,
@@ -300,7 +300,7 @@ fn home() -> PathBuf {
     dirs::home_dir().unwrap_or_else(|| PathBuf::from("."))
 }
 
-/// The saved default directory if it still exists, otherwise office's folder.
+/// The saved default directory if it still exists, otherwise salash's folder.
 fn usable_default(saved: Option<&Path>, folder: &Path) -> PathBuf {
     saved.filter(|p| p.is_dir()).unwrap_or(folder).to_path_buf()
 }
@@ -783,8 +783,8 @@ impl App {
         let mut env = vec![
             ("SALASH_TAB".to_string(), st.id.clone()),
             ("SALASH_ISSUE".to_string(), id.to_string()),
-            // Hooks and `office tab new` in the tab reach this office, not another folder's.
-            ("OFFICE_DATA".to_string(), crate::config::data_dir().to_string_lossy().into_owned()),
+            // Hooks and `salash tab new` in the tab reach this salash, not another folder's.
+            ("SALASH_DATA".to_string(), crate::config::data_dir().to_string_lossy().into_owned()),
         ];
         if let Some(note) = note {
             env.push(("SALASH_NOTE".to_string(), note.path.to_string_lossy().into_owned()));
@@ -1810,7 +1810,7 @@ mod tests {
 
     #[test]
     fn a_deleted_default_falls_back_to_the_folder() {
-        let dir = std::env::temp_dir().join(format!("office-test-{}", uuid::Uuid::new_v4()));
+        let dir = std::env::temp_dir().join(format!("salash-test-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         let folder = Path::new("/srv/team");
 

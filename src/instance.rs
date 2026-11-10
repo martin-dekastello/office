@@ -1,4 +1,4 @@
-//! One office per folder. Its server, state and socket live in `<folder>/.office`,
+//! One salash per folder. Its server, state and socket live in `<folder>/.salash`,
 //! so everyone who can see the folder can find it and attach.
 
 use anyhow::{bail, Context, Result};
@@ -7,7 +7,7 @@ use std::fs::File;
 use std::path::{Path, PathBuf};
 
 /// The folder's own directory, next to the user's files.
-pub const DIR: &str = ".office";
+pub const DIR: &str = ".salash";
 /// Longest socket path that fits `sun_path` on every Unix (macOS has 104 bytes).
 #[cfg(unix)]
 const MAX_SOCKET_PATH: usize = 100;
@@ -15,7 +15,7 @@ const MAX_SOCKET_PATH: usize = 100;
 #[derive(Debug, Clone, PartialEq)]
 pub struct Instance {
     pub folder: PathBuf,
-    /// `<folder>/.office`
+    /// `<folder>/.salash`
     pub dir: PathBuf,
 }
 
@@ -49,9 +49,9 @@ impl Instance {
     }
 
     /// The instance a command run here belongs to: the one whose tab this is,
-    /// else the nearest folder above `cwd` that has a `.office`, as git finds `.git`.
+    /// else the nearest folder above `cwd` that has a `.salash`, as git finds `.git`.
     pub fn find(cwd: &Path) -> Option<Instance> {
-        if let Ok(d) = std::env::var("OFFICE_DATA") {
+        if let Ok(d) = std::env::var("SALASH_DATA") {
             let d = PathBuf::from(d);
             if d.file_name() == Some(std::ffi::OsStr::new(DIR)) {
                 return d.parent().map(|f| Instance::at(f.to_path_buf()));
@@ -66,7 +66,7 @@ impl Instance {
             .map(|f| Instance::at(f.to_path_buf()))
     }
 
-    /// Create `.office`. It ignores itself, so the folder's repo stays clean.
+    /// Create `.salash`. It ignores itself, so the folder's repo stays clean.
     pub fn ensure_dir(&self) -> Result<()> {
         std::fs::create_dir_all(&self.dir)
             .with_context(|| format!("creating {}", self.dir.display()))?;
@@ -81,22 +81,22 @@ impl Instance {
         self.dir.join("server.log")
     }
 
-    /// Where the socket is. In `.office` when the path is short enough for a
+    /// Where the socket is. In `.salash` when the path is short enough for a
     /// Unix socket, else in /tmp under a name every user derives the same way.
     #[cfg(unix)]
     pub fn socket_path(&self) -> PathBuf {
-        let p = self.dir.join("office.sock");
+        let p = self.dir.join("salash.sock");
         if p.as_os_str().len() <= MAX_SOCKET_PATH {
             p
         } else {
-            PathBuf::from(format!("/tmp/office-{}.sock", hash(&self.folder)))
+            PathBuf::from(format!("/tmp/salash-{}.sock", hash(&self.folder)))
         }
     }
 
-    /// Refuse a socket that isn't this office's: a symlink, or in the `/tmp`
-    /// fallback one owned by someone other than the owner of `.office`. That
+    /// Refuse a socket that isn't this salash's: a symlink, or in the `/tmp`
+    /// fallback one owned by someone other than the owner of `.salash`. That
     /// name is one anyone can work out, so another user could bind it first
-    /// and collect the keys a client sends. Inside `.office` only those who
+    /// and collect the keys a client sends. Inside `.salash` only those who
     /// may write there can make one, and they could change the state anyway.
     #[cfg(unix)]
     pub fn check_socket(&self) -> Result<()> {
@@ -104,7 +104,7 @@ impl Instance {
         let sock = self.socket_path();
         let Ok(meta) = std::fs::symlink_metadata(&sock) else { return Ok(()) };
         if meta.file_type().is_symlink() {
-            bail!("{} is a symlink, not office's socket", sock.display());
+            bail!("{} is a symlink, not salash's socket", sock.display());
         }
         if sock.starts_with(&self.dir) {
             return Ok(());
@@ -128,7 +128,7 @@ impl Instance {
     #[cfg(windows)]
     pub fn socket_name(&self) -> std::io::Result<Name<'static>> {
         use interprocess::local_socket::{GenericNamespaced, ToNsName};
-        format!("office-{}.sock", hash(&self.folder)).to_ns_name::<GenericNamespaced>().map(|n| n.into_owned())
+        format!("salash-{}.sock", hash(&self.folder)).to_ns_name::<GenericNamespaced>().map(|n| n.into_owned())
     }
 
     pub fn lock_path(&self) -> PathBuf {
@@ -136,14 +136,14 @@ impl Instance {
     }
 
     /// Held by the server while it runs, so a folder never gets two. It holds
-    /// the server's pid, so `kill $(cat .office/server.lock)` stops it cleanly.
+    /// the server's pid, so `kill $(cat .salash/server.lock)` stops it cleanly.
     pub fn lock(&self) -> Result<File> {
         use std::io::Write;
         let path = self.lock_path();
         let mut f = File::options().create(true).truncate(false).write(true).open(&path)
             .with_context(|| format!("opening {}", path.display()))?;
         if f.try_lock().is_err() {
-            bail!("office is already running in {}", self.folder.display());
+            bail!("salash is already running in {}", self.folder.display());
         }
         f.set_len(0)?;
         writeln!(f, "{}", std::process::id())?;
@@ -151,7 +151,7 @@ impl Instance {
     }
 }
 
-/// Move the state from before office ran per folder into the first folder
+/// Move the state from before salash ran per folder into the first folder
 /// started, once, so its tabs and sessions come along. Tab directories are
 /// absolute, so sessions resume from where they started as before. True if
 /// anything moved.
@@ -197,13 +197,13 @@ mod tests {
     use super::*;
 
     fn temp() -> PathBuf {
-        let d = std::env::temp_dir().join(format!("office-test-{}", uuid::Uuid::new_v4()));
+        let d = std::env::temp_dir().join(format!("salash-test-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&d).unwrap();
         std::fs::canonicalize(d).unwrap()
     }
 
     #[test]
-    fn finds_the_nearest_office_above() {
+    fn finds_the_nearest_salash_above() {
         let root = temp();
         let deep = root.join("a/b/c");
         std::fs::create_dir_all(&deep).unwrap();
@@ -216,7 +216,7 @@ mod tests {
     }
 
     #[test]
-    fn office_dir_ignores_itself() {
+    fn salash_dir_ignores_itself() {
         let root = temp();
         let i = Instance::new(Some(&root)).unwrap();
         i.ensure_dir().unwrap();
@@ -241,7 +241,7 @@ mod tests {
     #[test]
     fn long_folders_get_a_short_socket() {
         let short = Instance::at(PathBuf::from("/srv/team"));
-        assert_eq!(short.socket_path(), PathBuf::from("/srv/team/.office/office.sock"));
+        assert_eq!(short.socket_path(), PathBuf::from("/srv/team/.salash/salash.sock"));
         let long = Instance::at(PathBuf::from(format!("/srv/{}", "x".repeat(120))));
         let p = long.socket_path();
         assert!(p.starts_with("/tmp") && p.as_os_str().len() <= MAX_SOCKET_PATH);
@@ -286,7 +286,7 @@ mod tests {
         let marker = std::fs::read_to_string(global.join("migrated")).unwrap();
         assert_eq!(marker.trim(), root.join("folder").display().to_string());
 
-        // A second folder, or new global state written by an old office, stays put.
+        // A second folder, or new global state written by an old salash, stays put.
         std::fs::write(global.join("state.json"), "{\"new\":1}").unwrap();
         let other = root.join("other").join(DIR);
         assert!(!migrate(&global, &other).unwrap());

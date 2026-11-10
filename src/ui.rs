@@ -83,7 +83,7 @@ pub fn draw(app: &mut App, f: &mut Frame) {
         }
         Mode::Confirm(kind) => {
             let q = match kind {
-                ConfirmKind::Quit => "Quit office for everyone attached? Sessions stop; Claude tabs resume next time. (D detaches instead) [y/N]",
+                ConfirmKind::Quit => "Quit salash for everyone attached? Sessions stop; Claude tabs resume next time. (D detaches instead) [y/N]",
                 ConfirmKind::CloseTab => "Close this tab and stop its process? (R reopens Claude tabs) [y/N]",
                 ConfirmKind::Suspend => "Claude isn't idle, so this interrupts it. Suspend anyway? [y/N]",
             };
@@ -504,8 +504,8 @@ fn draw_help(app: &App, f: &mut Frame, area: Rect) {
         ("S / r".into(), "sync GitHub/Jira"),
         ("[ / ]".into(), "scroll the tab back / forward (also mouse wheel)"),
         (p.to_string(), "send the prefix key itself"),
-        ("D".into(), "detach: office keeps running, `office --attach` returns"),
-        ("q".into(), "quit office for everyone attached"),
+        ("D".into(), "detach: salash keeps running, `salash --attach` returns"),
+        ("q".into(), "quit salash for everyone attached"),
         ("".into(), ""),
         ("Status".into(), "✳ working  ● needs you  ● done  ○ idle  ✕ exited"),
         ("".into(), "– suspended (⏎ resumes, scrolling still works)"),

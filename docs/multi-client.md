@@ -1,7 +1,7 @@
 # Several clients, several people
 
-Any number of clients can attach to a folder's office: your own second terminal, or other
-people sshing into a shared server and running `office --attach /srv/project`. This page covers
+Any number of clients can attach to a folder's salash: your own second terminal, or other
+people sshing into a shared server and running `salash --attach /srv/project`. This page covers
 how that works today and which settings will come later.
 
 ## How it works now
@@ -25,31 +25,31 @@ window:
   (Obsidian) and `w` (browser) open on the machine your client runs on. Over ssh that is the
   server, so they only help when you sit at it.
 - **Bell**: every client hears it.
-- **Detach** (`D`) affects only the client that pressed it. **Quit** (`q`) ends office for
+- **Detach** (`D`) affects only the client that pressed it. **Quit** (`q`) ends salash for
   everyone, and the confirmation says so.
 
 ## Who can attach, and as whom
 
-- The socket's permissions follow `<folder>/.office`. The owner can always attach. Group
-  members can if they may write to `.office` (group `w` and `x`), and anyone can if everyone
-  may. Being able to only enter it isn't enough: `.office` is created with the usual umask, so
+- The socket's permissions follow `<folder>/.salash`. The owner can always attach. Group
+  members can if they may write to `.salash` (group `w` and `x`), and anyone can if everyone
+  may. Being able to only enter it isn't enough: `.salash` is created with the usual umask, so
   it is often `755`, and that must not hand out a shell. To share with a team:
 
   ```sh
-  chgrp -R devs /srv/project/.office && chmod -R g+rwX /srv/project/.office
+  chgrp -R devs /srv/project/.salash && chmod -R g+rwX /srv/project/.salash
   ```
 
-  The socket's mode is set when the server starts, so restart office after changing this.
+  The socket's mode is set when the server starts, so restart salash after changing this.
 - **Everyone attached acts as the user who started the server.** Claude, shells and worktree
   scripts all run as that user, with that user's credentials (`gh` login, `$JIRA_API_TOKEN`,
   Claude account, ssh agent). Being able to attach is the same as being able to run commands
   as that user. Grant it accordingly. tmux works the same way, which is why it added
   `server-access`.
-- The server and its tabs keep the environment of the `office` that started them: `PATH`,
+- The server and its tabs keep the environment of the `salash` that started them: `PATH`,
   `SSH_AUTH_SOCK`, tokens. Attaching later doesn't change it, much as tmux behaves without
   `update-environment`.
-- Config: the server reads the starting user's `~/.config/office/config.toml` plus the
-  folder's `.office/config.toml`. On a shared server, put team settings (vault, GitHub
+- Config: the server reads the starting user's `~/.config/salash/config.toml` plus the
+  folder's `.salash/config.toml`. On a shared server, put team settings (vault, GitHub
   sources, prefix) in the folder's file. Commands, repo paths and Jira stay in the starting
   user's own config; the folder's file can't set them.
 - Windows: the named pipe is created with the default security descriptor, so other users
@@ -80,7 +80,7 @@ which can scramble a shell that's printing.
 
 Today every tab of the visible issue is resized to the shared size, while background issues
 keep their last size until someone looks at them. tmux's `aggressive-resize` sizes a window
-only to the clients *currently looking at it*. office would only use it with per-client views
+only to the clients *currently looking at it*. salash would only use it with per-client views
 (below), where different people can be on different issues.
 
 ### Per-client views (`mirror = false`)
@@ -96,7 +96,7 @@ Each client gets its own selected issue, tab, focus, prompt and prefix state, li
 
 ### Read-only clients
 
-`office --attach --read-only`, like `tmux attach -r`. The server would ignore input from such
+`salash --attach --read-only`, like `tmux attach -r`. The server would ignore input from such
 a client, except for detaching. Useful for watching or demos.
 
 ### An access list
@@ -108,5 +108,5 @@ gives finer control than file permissions.
 ### Seeing who's here
 
 Show the attached clients (user, terminal size, idle time) in the status bar or with
-`office clients`, and let the owner disconnect one, like tmux's `list-clients` /
+`salash clients`, and let the owner disconnect one, like tmux's `list-clients` /
 `detach-client -t`.

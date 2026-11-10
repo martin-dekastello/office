@@ -1,4 +1,4 @@
-//! The server of one folder's office: it owns the tabs and keeps them running
+//! The server of one folder's salash: it owns the tabs and keeps them running
 //! with or without clients, like a tmux server.
 //!
 //! Every client sees the same view. The UI is drawn once, at the size of the
@@ -110,7 +110,7 @@ struct Server {
     mouse: bool,
 }
 
-/// `office server <folder>`: run in the background until quit.
+/// `salash server <folder>`: run in the background until quit.
 pub fn run(inst: Instance) -> Result<()> {
     inst.ensure_dir()?;
     let _lock = lock(&inst)?;
@@ -127,13 +127,13 @@ pub fn run(inst: Instance) -> Result<()> {
     }
     if !app.cfg.ignored.is_empty() {
         app.flash(format!(
-            "Ignored in .office/config.toml: {} (only your own config may set these)",
+            "Ignored in .salash/config.toml: {} (only your own config may set these)",
             app.cfg.ignored.join(", ")
         ));
     }
     let rx = listen(&inst)?;
     let stop = stop_on_signal();
-    eprintln!("office serving {}", inst.folder.display());
+    eprintln!("salash serving {}", inst.folder.display());
 
     let mut srv = Server { clients: BTreeMap::new(), shared: None, mouse };
     while !app.quit && !stop.load(Ordering::Relaxed) {
@@ -162,11 +162,11 @@ pub fn run(inst: Instance) -> Result<()> {
     app.save_sessions();
     app.state.selected = app.selected.clone();
     app.state.save();
-    srv.goodbye("office quit");
+    srv.goodbye("salash quit");
     // While the lock is held, so a new server's socket is never the one removed.
     #[cfg(unix)]
     let _ = std::fs::remove_file(inst.socket_path());
-    eprintln!("office quit");
+    eprintln!("salash quit");
     Ok(())
     // Dropping the app kills the tabs' processes.
 }
@@ -203,7 +203,7 @@ fn stop_on_signal() -> Arc<AtomicBool> {
     stop
 }
 
-/// The socket's mode for a `.office` with mode `dir`: whoever may write there
+/// The socket's mode for a `.salash` with mode `dir`: whoever may write there
 /// (enter and write) may attach. Not merely enter: a plain `mkdir` under the
 /// usual umask leaves a folder others can enter, and attaching means running
 /// commands as the server's user.
@@ -399,7 +399,7 @@ impl Server {
         });
     }
 
-    /// Tell every client office is gone, giving each a moment to hear it.
+    /// Tell every client salash is gone, giving each a moment to hear it.
     fn goodbye(self, reason: &str) {
         let deadline = Instant::now() + GOODBYE;
         let writers: Vec<JoinHandle<()>> =
@@ -451,7 +451,7 @@ pub fn spawn(inst: &Instance) -> Result<()> {
         const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
         cmd.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
     }
-    cmd.spawn().context("starting the office server")?;
+    cmd.spawn().context("starting the salash server")?;
     Ok(())
 }
 
@@ -468,7 +468,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn only_those_who_may_write_to_office_may_attach() {
+    fn only_those_who_may_write_to_salash_may_attach() {
         assert_eq!(socket_mode(0o755), 0o600, "a plain mkdir under umask 022");
         assert_eq!(socket_mode(0o700), 0o600);
         assert_eq!(socket_mode(0o2775), 0o660, "chmod g+rwX for a team");

@@ -66,7 +66,7 @@ pub struct Config {
     pub theme: String,
     pub github: Vec<GithubSource>,
     pub jira: Vec<JiraSource>,
-    /// What the folder's `.office/config.toml` tried to set but may not.
+    /// What the folder's `.salash/config.toml` tried to set but may not.
     #[serde(skip)]
     pub ignored: Vec<String>,
 }
@@ -103,10 +103,10 @@ impl Default for Config {
     }
 }
 
-const TEMPLATE: &str = r#"# office configuration
-# <folder>/.office/config.toml can override vault, notes_dir, prefix, local_prefix,
-# bell, mouse and [[github]] (without path) for `office <folder>`. Commands, repo
-# paths and Jira only come from here: a repo can ship its own .office/config.toml.
+const TEMPLATE: &str = r#"# salash configuration
+# <folder>/.salash/config.toml can override vault, notes_dir, prefix, local_prefix,
+# bell, mouse and [[github]] (without path) for `salash <folder>`. Commands, repo
+# paths and Jira only come from here: a repo can ship its own .salash/config.toml.
 
 # Obsidian vault root and the folder inside it that holds active/ done/ archive/
 vault = "{VAULT}"
@@ -160,27 +160,27 @@ pub fn config_path() -> PathBuf {
 /// The data dir of the folder this process serves, set once at startup.
 static DATA_DIR: OnceLock<PathBuf> = OnceLock::new();
 
-/// Make `data_dir()` the folder's `.office` for the rest of the process.
+/// Make `data_dir()` the folder's `.salash` for the rest of the process.
 pub fn set_data_dir(dir: PathBuf) {
     let _ = DATA_DIR.set(dir);
 }
 
-/// Where state, saved screens and status files live: the folder's `.office`
-/// in the server and in its tabs (`$OFFICE_DATA`), the global one otherwise.
+/// Where state, saved screens and status files live: the folder's `.salash`
+/// in the server and in its tabs (`$SALASH_DATA`), the global one otherwise.
 pub fn data_dir() -> PathBuf {
     if let Some(d) = DATA_DIR.get() {
         return d.clone();
     }
-    if let Ok(p) = std::env::var("OFFICE_DATA") {
+    if let Ok(p) = std::env::var("SALASH_DATA") {
         return PathBuf::from(p);
     }
     global_data_dir()
 }
 
-/// The data dir from before there was one per folder. `$OFFICE_DATA` counts
-/// unless it names a folder's `.office`, as it does inside a tab.
+/// The data dir from before there was one per folder. `$SALASH_DATA` counts
+/// unless it names a folder's `.salash`, as it does inside a tab.
 pub fn global_data_dir() -> PathBuf {
-    if let Ok(p) = std::env::var("OFFICE_DATA") {
+    if let Ok(p) = std::env::var("SALASH_DATA") {
         let p = PathBuf::from(p);
         if p.file_name() != Some(std::ffi::OsStr::new(crate::instance::DIR)) {
             return p;
@@ -213,7 +213,7 @@ pub fn shorten(p: &Path) -> String {
 
 impl Config {
     /// Load the config, writing a commented template on first run, with a
-    /// folder's `.office/config.toml` over it if given.
+    /// folder's `.salash/config.toml` over it if given.
     pub fn load_for(instance_dir: Option<&Path>) -> Result<(Config, bool)> {
         let path = config_path();
         let mut created = false;
@@ -313,11 +313,11 @@ impl Config {
 }
 
 /// What a folder's own config may set. A cloned repo can ship
-/// `.office/config.toml`, so nothing that runs commands or sends credentials:
+/// `.salash/config.toml`, so nothing that runs commands or sends credentials:
 /// no `*_command`, no repo paths (worktrees run their hooks), no Jira.
 const FOLDER_KEYS: &[&str] = &["vault", "notes_dir", "prefix", "local_prefix", "bell", "mouse", "github"];
 
-/// A folder's `.office/config.toml`, cut down to `FOLDER_KEYS`, and the keys it lost.
+/// A folder's `.salash/config.toml`, cut down to `FOLDER_KEYS`, and the keys it lost.
 fn folder_overlay(path: &Path) -> Result<(toml::Table, Vec<String>)> {
     let text = std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
     let table: toml::Table =
@@ -400,7 +400,7 @@ mod tests {
 
     #[test]
     fn a_folder_config_cannot_run_commands() {
-        let dir = std::env::temp_dir().join(format!("office-test-{}", uuid::Uuid::new_v4()));
+        let dir = std::env::temp_dir().join(format!("salash-test-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         let over = dir.join("config.toml");
         std::fs::write(

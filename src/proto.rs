@@ -1,4 +1,4 @@
-//! Messages between `office` clients and the server of a folder.
+//! Messages between `salash` clients and the server of a folder.
 //!
 //! A frame is a tag byte, a big-endian u32 length and the payload. The client
 //! sends what the user does as crossterm events; the server renders and sends
@@ -9,9 +9,9 @@ use crossterm::event::Event;
 use std::io::{Read, Write};
 
 /// Changes whenever a message changes, so a client and a server from different
-/// builds of office (one upgraded while the other ran) tell rather than misread.
+/// builds of salash (one upgraded while the other ran) tell rather than misread.
 pub const VERSION: u8 = 1;
-/// Larger frames mean the other end isn't office. Clients only send events,
+/// Larger frames mean the other end isn't salash. Clients only send events,
 /// pastes included; servers send whole screens.
 const MAX_CLIENT_FRAME: u32 = 16 << 20;
 const MAX_SERVER_FRAME: u32 = 64 << 20;
@@ -33,7 +33,7 @@ pub enum ServerMsg {
     Clipboard(String),
     /// A URL to open on the client's side.
     Open(String),
-    /// The client is done: detached, or office quit.
+    /// The client is done: detached, or salash quit.
     Exit(String),
 }
 

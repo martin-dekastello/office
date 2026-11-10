@@ -26,7 +26,7 @@ use std::path::PathBuf;
 
 #[derive(Parser)]
 #[command(
-    name = "office",
+    name = "salash",
     version,
     about = "Issues on the left, Claude Code tabs on the right, notes in Obsidian.",
     args_conflicts_with_subcommands = true
@@ -34,17 +34,17 @@ use std::path::PathBuf;
 struct Cli {
     #[command(subcommand)]
     cmd: Option<Cmd>,
-    /// Folder to run office in (default: the current directory). One office
-    /// runs per folder, in the background; its state lives in <folder>/.office.
+    /// Folder to run salash in (default: the current directory). One salash
+    /// runs per folder, in the background; its state lives in <folder>/.salash.
     folder: Option<PathBuf>,
-    /// Attach to the office already running in the folder.
+    /// Attach to the salash already running in the folder.
     #[arg(long, short)]
     attach: bool,
 }
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// Run a folder's office in the foreground, without a terminal (started by `office`).
+    /// Run a folder's salash in the foreground, without a terminal (started by `salash`).
     #[command(hide = true)]
     Server { folder: PathBuf },
     /// Called by Claude Code hooks (reads the hook JSON on stdin).
@@ -89,8 +89,8 @@ enum TabCmd {
         /// File whose text is Claude's first prompt.
         #[arg(long)]
         prompt_file: Option<std::path::PathBuf>,
-        /// Folder of the office to open it in; defaults to this tab's office,
-        /// else the nearest folder above with a .office.
+        /// Folder of the salash to open it in; defaults to this tab's salash,
+        /// else the nearest folder above with a .salash.
         #[arg(long)]
         folder: Option<PathBuf>,
     },
@@ -105,7 +105,7 @@ enum TabKindArg {
 
 const SKILL: &str = include_str!("../skills/new-salash-tab/SKILL.md");
 
-/// The office a command run here belongs to, if any. Its data dir applies
+/// The salash a command run here belongs to, if any. Its data dir applies
 /// from here on.
 fn here() -> Option<Instance> {
     let inst = Instance::find(&std::env::current_dir().ok()?)?;

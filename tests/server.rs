@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output};
 use std::time::{Duration, Instant};
 
-const BIN: &str = env!("CARGO_BIN_EXE_office");
+const BIN: &str = env!("CARGO_BIN_EXE_salash");
 
 struct Env {
     root: PathBuf,
@@ -18,9 +18,9 @@ struct Env {
 
 impl Env {
     fn new() -> Env {
-        // In /tmp rather than macOS's long $TMPDIR, so the socket fits in .office.
+        // In /tmp rather than macOS's long $TMPDIR, so the socket fits in .salash.
         let id = uuid::Uuid::new_v4().simple().to_string();
-        let root = std::fs::canonicalize("/tmp").unwrap().join(format!("office-it-{}", &id[..12]));
+        let root = std::fs::canonicalize("/tmp").unwrap().join(format!("salash-it-{}", &id[..12]));
         let folder = root.join("work");
         std::fs::create_dir_all(&folder).unwrap();
         std::fs::create_dir_all(root.join("vault")).unwrap();
@@ -36,9 +36,9 @@ impl Env {
     fn cmd(&self) -> Command {
         let mut c = Command::new(BIN);
         // Never the real config or the real global state.
-        c.env("OFFICE_CONFIG", self.root.join("config.toml"))
-            .env("OFFICE_DATA", self.root.join("global"))
-            .env_remove("OFFICE_TAB")
+        c.env("SALASH_CONFIG", self.root.join("config.toml"))
+            .env("SALASH_DATA", self.root.join("global"))
+            .env_remove("SALASH_TAB")
             .current_dir(&self.root);
         c
     }
@@ -53,7 +53,7 @@ impl Env {
     }
 
     fn socket(&self) -> PathBuf {
-        self.folder.join(".office/office.sock")
+        self.folder.join(".salash/salash.sock")
     }
 
     fn connect(&self) -> UnixStream {
@@ -154,9 +154,9 @@ fn one_server_per_folder_with_attach_detach_and_quit() {
     until(&mut b, 10);
     hello(&mut b, 80, 20);
     let (out, _) = until(&mut b, 11);
-    assert!(String::from_utf8_lossy(&out).contains("office"));
+    assert!(String::from_utf8_lossy(&out).contains("salash"));
 
-    // Detaching one leaves office running for the other.
+    // Detaching one leaves salash running for the other.
     key(&mut b, 'D');
     let (why, _) = until(&mut b, 14);
     assert_eq!(why, b"detached");
@@ -166,12 +166,12 @@ fn one_server_per_folder_with_attach_detach_and_quit() {
     key(&mut a, 'q');
     key(&mut a, 'y');
     let (why, _) = until(&mut a, 14);
-    assert_eq!(why, b"office quit");
+    assert_eq!(why, b"salash quit");
     let st = wait_exit(&mut server).expect("server didn't quit");
     assert!(st.success());
     assert!(!env.socket().exists());
-    assert!(env.folder.join(".office/state.json").exists());
-    assert_eq!(std::fs::read_to_string(env.folder.join(".office/.gitignore")).unwrap(), "*\n");
+    assert!(env.folder.join(".salash/state.json").exists());
+    assert_eq!(std::fs::read_to_string(env.folder.join(".salash/.gitignore")).unwrap(), "*\n");
 }
 
 #[test]
@@ -183,17 +183,17 @@ fn kill_stops_it_as_quitting_does() {
     hello(&mut a, 100, 30);
     until(&mut a, 11);
 
-    let pid = read_trim(&env.folder.join(".office/server.lock"));
+    let pid = read_trim(&env.folder.join(".salash/server.lock"));
     assert_eq!(pid, server.id().to_string());
     let killed = Command::new("kill").args(["-TERM", &pid]).status().unwrap();
     assert!(killed.success());
 
     let (why, _) = until(&mut a, 14);
-    assert_eq!(why, b"office quit");
+    assert_eq!(why, b"salash quit");
     let st = wait_exit(&mut server).expect("server didn't stop");
     assert!(st.success(), "{st:?}");
     assert!(!env.socket().exists());
-    assert!(env.folder.join(".office/state.json").exists());
+    assert!(env.folder.join(".salash/state.json").exists());
 }
 
 #[test]
@@ -201,7 +201,7 @@ fn attach_without_a_server_says_how_to_start() {
     let env = Env::new();
     let o = env.run(&["--attach", env.folder.to_str().unwrap()]);
     assert!(!o.status.success());
-    assert!(text(&o).contains("no office running"), "{}", text(&o));
+    assert!(text(&o).contains("no salash running"), "{}", text(&o));
 }
 
 #[test]
@@ -222,10 +222,10 @@ fn global_state_moves_into_the_first_folder() {
     until(&mut a, 14);
     wait_exit(&mut server).expect("server didn't quit");
 
-    let moved = std::fs::read_to_string(env.folder.join(".office/state.json")).unwrap();
+    let moved = std::fs::read_to_string(env.folder.join(".salash/state.json")).unwrap();
     assert!(moved.contains("\"claude_session\": \"s1\""), "{moved}");
     assert!(moved.contains("/somewhere"));
-    assert!(env.folder.join(".office/snapshots/t1.ansi").exists());
+    assert!(env.folder.join(".salash/snapshots/t1.ansi").exists());
     assert!(!global.join("state.json").exists());
     assert_eq!(read_trim(&global.join("migrated")), env.folder.display().to_string());
 }

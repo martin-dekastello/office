@@ -48,9 +48,9 @@ The name comes from the Slovak word *salaš*, a shepherd's hut up in the mountai
 - **Tabs close when their process exits**: quit Claude, `exit` a shell or close the note's
   editor and the tab goes away. A Claude session that exits can still be brought back with
   `R`. Only a Claude that fails to start stays open, so you can read why.
-- **One office per folder, running in the background**, like a tmux server. `office ~/work`
+- **One salash per folder, running in the background**, like a tmux server. `salash ~/work`
   starts it and attaches. Closing the terminal, or `D` to detach, leaves every tab running, and
-  `office --attach ~/work` picks it up again, from another terminal or over ssh. Several people
+  `salash --attach ~/work` picks it up again, from another terminal or over ssh. Several people
   can attach at once and share one view. See [docs/architecture.md](docs/architecture.md)
   and [docs/multi-client.md](docs/multi-client.md).
 - **GitHub (via `gh`) + Jira Cloud + local issues**, behind one `Provider` trait.
@@ -64,26 +64,26 @@ The name comes from the Slovak word *salaš*, a shepherd's hut up in the mountai
 
 ```sh
 cargo install --path .
-office [folder]      # start office in a folder (default: here); first run writes the config
-office paths         # where config, data, notes and worktrees live
+salash [folder]      # start salash in a folder (default: here); first run writes the config
+salash paths         # where config, data, notes and worktrees live
 ```
 
-Each folder's office keeps its tabs, sessions and socket in `<folder>/.office`, which ignores
-itself in git. The first office you start takes over the tabs and sessions saved by older
-versions of office.
+Each folder's salash keeps its tabs, sessions and socket in `<folder>/.salash`, which ignores
+itself in git. The first salash you start takes over the tabs and sessions saved by older
+versions of salash.
 
 Requirements: `claude` on PATH, `git` for worktrees, `gh` (logged in) for GitHub sources,
 `$JIRA_API_TOKEN` for Jira.
 
 ## Config
 
-`~/.config/office/config.toml` on Linux, `~/Library/Application Support/office/config.toml`
-on macOS, `%APPDATA%\office\config.toml` on Windows. Override with `$OFFICE_CONFIG`.
-A folder's `.office/config.toml` overrides some of it for that folder's office: `vault`,
+`~/.config/salash/config.toml` on Linux, `~/Library/Application Support/salash/config.toml`
+on macOS, `%APPDATA%\salash\config.toml` on Windows. Override with `$SALASH_CONFIG`.
+A folder's `.salash/config.toml` overrides some of it for that folder's salash: `vault`,
 `notes_dir`, `prefix`, `local_prefix`, `bell`, `mouse` and `[[github]]` sources (without
 `path`). For example, give a team folder its own vault and sources. Commands, repo paths and
-Jira only come from your own config, because a repo you clone can ship a `.office/config.toml`.
-office ignores the rest and says so when it starts.
+Jira only come from your own config, because a repo you clone can ship a `.salash/config.toml`.
+salash ignores the rest and says so when it starts.
 
 ```toml
 vault = "~/Documents/Obsidian"
@@ -141,7 +141,7 @@ completes the path as in zsh: it fills in what it can, lists the matches, then c
 them (`Shift-Tab` goes back, `/` enters the selected folder). The tab keeps that directory
 when it restarts or resumes, and no worktree is created for it.
 
-Issues with no repo start their tabs in the default directory, which is office's folder
+Issues with no repo start their tabs in the default directory, which is salash's folder
 until you change it. Press `p` to set it, in the same dialog as `C`. A tab keeps the directory
 it started in, so changing the default only affects new tabs, and sessions always resume where
 they began.
@@ -167,7 +167,7 @@ to the terminal.
 | `n` | new local issue |
 | `S` | sync GitHub/Jira |
 | `x` | close tab |
-| `D` / `q` | detach (office keeps running) / quit office for everyone attached |
+| `D` / `q` | detach (salash keeps running) / quit salash for everyone attached |
 
 | `prefix` then | |
 |---|---|
@@ -192,7 +192,7 @@ the wheel. Anything else scrolls salash's scrollback.
 
 In a shell tab, drag to select text. Letting go copies it, and the highlight stays until you
 click or type. Hold the mouse above or below the tab to scroll while selecting. Your own
-`office` client copies it, with `pbcopy`, `clip`, or `wl-copy`/`xclip`/`xsel`, and also OSC 52 for SSH. Anywhere else, including
+`salash` client copies it, with `pbcopy`, `clip`, or `wl-copy`/`xclip`/`xsel`, and also OSC 52 for SSH. Anywhere else, including
 Claude tabs and shell apps that handle the mouse themselves, hold Shift (Option in iTerm) to
 select text.
 
@@ -207,9 +207,9 @@ install globally. If you'd rather not use `--settings`, set `inject_hooks = fals
 `salash install-hooks`. That merges the hooks into `~/.claude/settings.json` and writes
 a backup first.
 
-Every tab also gets `OFFICE_ISSUE`, `OFFICE_NOTE` (the note's path), `OFFICE_BIN` (the
-office executable) and `OFFICE_DATA` (its office's `.office`, where `<data>` is). You can tell
-Claude "append a summary to $OFFICE_NOTE".
+Every tab also gets `SALASH_ISSUE`, `SALASH_NOTE` (the note's path), `SALASH_BIN` (the
+salash executable) and `SALASH_DATA` (its folder's `.salash`, where `<data>` is). You can tell
+Claude "append a summary to $SALASH_NOTE".
 
 ## Opening tabs from Claude
 
@@ -225,8 +225,8 @@ salash tab new --issue scratch     # a tab outside any issue
 
 `--mode` and `--prompt-file` apply only to the first launch. A suspended or restarted tab
 resumes its session as usual and never gets the prompt again. The command waits up to 5s
-for office to answer and fails if office isn't running. Inside a tab it goes to that tab's
-office. Elsewhere it goes to the office of the nearest folder above with a `.office`, or the
+for salash to answer and fails if salash isn't running. Inside a tab it goes to that tab's
+salash. Elsewhere it goes to the salash of the nearest folder above with a `.salash`, or the
 one given with `--folder`.
 
 `salash install-skill` adds the `/new-salash-tab` skill to `~/.claude/skills` (or
@@ -237,15 +237,15 @@ with the brief as its first prompt. It's like `/new-claude-tmux`, but without tm
 ## CLI
 
 ```
-office [folder]        # start the folder's office in the background and attach
-office --attach [folder]  # attach to the folder's running office
-office new <title>     # create a local issue note
-office sync            # pull GitHub/Jira issues and create missing notes in todo/
-office list
-office install-hooks
-office tab new [--issue ID] [--kind claude|shell|notes] [--cwd DIR] [--name NAME]
-               [--mode MODE] [--prompt-file FILE] [--folder DIR]   # open a tab in a running office
-office install-skill   # add /new-office-tab to ~/.claude/skills
+salash [folder]        # start the folder's salash in the background and attach
+salash --attach [folder]  # attach to the folder's running salash
+salash new <title>     # create a local issue note
+salash sync            # pull GitHub/Jira issues and create missing notes in todo/
+salash list
+salash install-hooks
+salash tab new [--issue ID] [--kind claude|shell|notes] [--cwd DIR] [--name NAME]
+               [--mode MODE] [--prompt-file FILE] [--folder DIR]   # open a tab in a running salash
+salash install-skill   # add /new-salash-tab to ~/.claude/skills
 ```
 
 ## Layout
@@ -253,9 +253,9 @@ office install-skill   # add /new-office-tab to ~/.claude/skills
 ```
 src/
   server.rs     the folder's background server: clients, shared view, main loop
-  client.rs     `office` in your terminal: starts/attaches, forwards input, prints output
+  client.rs     `salash` in your terminal: starts/attaches, forwards input, prints output
   proto.rs      client <-> server messages
-  instance.rs   one office per folder: .office, socket, lock, moving old state
+  instance.rs   one salash per folder: .salash, socket, lock, moving old state
   app.rs        state, input routing, tab lifecycle, status polling
   ui.rs         ratatui rendering (sidebar, tab bar, terminal, popups)
   term.rs       PTY + vt100 pane (portable-pty, tui-term)
@@ -264,7 +264,7 @@ src/
   vault.rs      Obsidian notes (todo/active/done/archive), slugs, frontmatter
   providers.rs  GitHub (gh), Jira REST v3
   status.rs     Claude Code hook handler and settings
-  api.rs        `office tab new` requests to the running office
+  api.rs        `salash tab new` requests to the running salash
   worktree.rs   per-issue git worktrees
   state.rs      persisted tabs, session IDs and saved screens
   transcript.rs conversation text from Claude's transcript, for saved screens
@@ -272,8 +272,8 @@ src/
 
 ## Known limits / next steps
 
-- Tabs keep running while you're detached, but quitting office stops them. Claude tabs
-  resume from their session ID afterwards, shells don't. `kill $(cat <folder>/.office/server.lock)`
+- Tabs keep running while you're detached, but quitting salash stops them. Claude tabs
+  resume from their session ID afterwards, shells don't. `kill $(cat <folder>/.salash/server.lock)`
   stops a server from outside the same way `q` does.
 - On Windows the server's named pipe has the default permissions, so other users on the same
   machine may be able to attach. Use it single-user there for now.
