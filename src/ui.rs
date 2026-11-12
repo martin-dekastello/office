@@ -3,9 +3,10 @@ use crate::complete::Completion;
 use crate::state::{SortMode, TabKind};
 use crate::status::ClaudeStatus;
 use crate::term::Snapshot;
+use crate::theme::{self, Theme};
 use crate::vault::Stage;
 use ratatui::layout::{Alignment, Constraint, Layout, Rect};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph, Wrap};
 use ratatui::Frame;
@@ -15,41 +16,33 @@ const SIDEBAR_W: u16 = 34;
 const MAX_MATCHES: usize = 8;
 const SPIN: [&str; 6] = ["·", "✢", "✳", "✶", "✻", "✽"];
 
-const BG_SIDE: Color = Color::Rgb(22, 22, 26);
-const BG_SEL: Color = Color::Rgb(48, 48, 58);
-const BG_TAB: Color = Color::Rgb(34, 34, 40);
-const BG_TAB_ACTIVE: Color = Color::Rgb(78, 78, 90);
-const FG_DIM: Color = Color::Rgb(120, 120, 132);
-const FG: Color = Color::Rgb(205, 205, 214);
-const ORANGE: Color = Color::Rgb(217, 119, 87); // Claude orange
-const AMBER: Color = Color::Rgb(245, 180, 60);
-const GREEN: Color = Color::Rgb(120, 200, 120);
-const RED: Color = Color::Rgb(220, 95, 95);
-const ACCENT: Color = Color::Rgb(140, 170, 255);
+fn colors() -> &'static Theme {
+    theme::get()
+}
 
 pub fn status_glyph(s: ClaudeStatus, spin: usize) -> (&'static str, Style) {
     match s {
-        ClaudeStatus::Working => (SPIN[spin % SPIN.len()], Style::new().fg(ORANGE).add_modifier(Modifier::BOLD)),
-        ClaudeStatus::Attention => ("●", Style::new().fg(AMBER).add_modifier(Modifier::BOLD)),
-        ClaudeStatus::Done => ("●", Style::new().fg(GREEN)),
-        ClaudeStatus::Idle => ("○", Style::new().fg(FG_DIM)),
-        ClaudeStatus::Starting => ("◌", Style::new().fg(FG_DIM)),
-        ClaudeStatus::Exited => ("✕", Style::new().fg(RED)),
+        ClaudeStatus::Working => (SPIN[spin % SPIN.len()], Style::new().fg(colors().orange).add_modifier(Modifier::BOLD)),
+        ClaudeStatus::Attention => ("●", Style::new().fg(colors().amber).add_modifier(Modifier::BOLD)),
+        ClaudeStatus::Done => ("●", Style::new().fg(colors().green)),
+        ClaudeStatus::Idle => ("○", Style::new().fg(colors().fg_dim)),
+        ClaudeStatus::Starting => ("◌", Style::new().fg(colors().fg_dim)),
+        ClaudeStatus::Exited => ("✕", Style::new().fg(colors().red)),
     }
 }
 
 fn tab_glyph(t: &Tab, rt: Option<&IssueRt>, spin: usize) -> (&'static str, Style) {
     if rt.is_some_and(|r| r.awaits_worktree(t)) {
-        return (SPIN[spin % SPIN.len()], Style::new().fg(FG_DIM));
+        return (SPIN[spin % SPIN.len()], Style::new().fg(colors().fg_dim));
     }
     if t.pane.is_none() {
-        return ("–", Style::new().fg(FG_DIM));
+        return ("–", Style::new().fg(colors().fg_dim));
     }
     match t.st.kind {
         TabKind::Claude => status_glyph(t.shown_status(), spin),
-        _ if t.status == ClaudeStatus::Exited => ("✕", Style::new().fg(RED)),
-        TabKind::Shell => ("$", Style::new().fg(FG_DIM)),
-        TabKind::Notes => ("✎", Style::new().fg(FG_DIM)),
+        _ if t.status == ClaudeStatus::Exited => ("✕", Style::new().fg(colors().red)),
+        TabKind::Shell => ("$", Style::new().fg(colors().fg_dim)),
+        TabKind::Notes => ("✎", Style::new().fg(colors().fg_dim)),
     }
 }
 
@@ -105,8 +98,8 @@ fn draw_sidebar(app: &mut App, f: &mut Frame, area: Rect) {
     let focused = app.focus == Focus::Sidebar;
     let block = Block::new()
         .borders(Borders::RIGHT)
-        .border_style(Style::new().fg(if focused { ACCENT } else { Color::Rgb(50, 50, 58) }))
-        .style(Style::new().bg(BG_SIDE));
+        .border_style(Style::new().fg(if focused { colors().accent } else { colors().border }))
+        .style(Style::new().bg(colors().bg_side));
     let inner = block.inner(area);
     f.render_widget(block, area);
 
@@ -124,19 +117,19 @@ fn draw_sidebar(app: &mut App, f: &mut Frame, area: Rect) {
         .flat_map(|r| r.tabs.iter())
         .filter(|t| t.pane.is_some() && t.shown_status() == ClaudeStatus::Attention)
         .count();
-    let mut h = vec![Span::styled(" salash", Style::new().fg(FG).add_modifier(Modifier::BOLD))];
+    let mut h = vec![Span::styled(" salash", Style::new().fg(colors().fg).add_modifier(Modifier::BOLD))];
     if app.syncing {
-        h.push(Span::styled(format!("  {} sync", SPIN[app.spinner % 6]), Style::new().fg(FG_DIM)));
+        h.push(Span::styled(format!("  {} sync", SPIN[app.spinner % 6]), Style::new().fg(colors().fg_dim)));
     }
     if attention > 0 {
-        h.push(Span::styled(format!("  ● {attention}"), Style::new().fg(AMBER).add_modifier(Modifier::BOLD)));
+        h.push(Span::styled(format!("  ● {attention}"), Style::new().fg(colors().amber).add_modifier(Modifier::BOLD)));
     }
     let head_used: usize = h.iter().map(Span::width).sum();
     f.render_widget(Paragraph::new(Line::from(h)), head);
 
     let quit_w = 6.min(head.width);
     app.quit_hit = Rect { x: head.right() - quit_w, width: quit_w, ..head };
-    f.render_widget(Paragraph::new(Span::styled(" quit ", Style::new().fg(FG_DIM))), app.quit_hit);
+    f.render_widget(Paragraph::new(Span::styled(" quit ", Style::new().fg(colors().fg_dim))), app.quit_hit);
 
     // The sort, unless it's the default; dropped when the header is full.
     if app.state.sort != SortMode::Created {
@@ -144,7 +137,7 @@ fn draw_sidebar(app: &mut App, f: &mut Frame, area: Rect) {
         let lw = label.chars().count() as u16;
         if head_used as u16 + lw < head.width - quit_w {
             let r = Rect { x: app.quit_hit.x - lw, width: lw, ..head };
-            f.render_widget(Paragraph::new(Span::styled(label, Style::new().fg(FG_DIM))), r);
+            f.render_widget(Paragraph::new(Span::styled(label, Style::new().fg(colors().fg_dim))), r);
         }
     }
 
@@ -160,9 +153,9 @@ fn draw_sidebar(app: &mut App, f: &mut Frame, area: Rect) {
         app.stage_hits.push((Rect { x, y: stages.y, width: w, height: 1 }.intersection(stages), s));
         x = x.saturating_add(w);
         let style = if s == app.view {
-            Style::new().fg(Color::Black).bg(FG).add_modifier(Modifier::BOLD)
+            Style::new().fg(colors().on_accent).bg(colors().fg).add_modifier(Modifier::BOLD)
         } else {
-            Style::new().fg(FG_DIM)
+            Style::new().fg(colors().fg_dim)
         };
         st.push(Span::styled(label, style));
     }
@@ -185,13 +178,13 @@ fn draw_sidebar(app: &mut App, f: &mut Frame, area: Rect) {
             Stage::Active => " Nothing in progress.\n c  on a To-do issue starts it\n u  move an issue here",
             _ => " Empty.",
         };
-        f.render_widget(Paragraph::new(hint).style(Style::new().fg(FG_DIM)), list);
+        f.render_widget(Paragraph::new(hint).style(Style::new().fg(colors().fg_dim)), list);
     }
     for (row, n) in notes.iter().enumerate().skip(offset).take(per_page) {
         let y = list.y + ((row - offset) * 2) as u16;
         let r = Rect { x: list.x, y, width: list.width, height: 2 };
         let selected = app.selected.as_deref() == Some(n.id.as_str());
-        let bg = if selected { BG_SEL } else { BG_SIDE };
+        let bg = if selected { colors().bg_sel } else { colors().bg_side };
         let rollup = app.rt.get(&n.id).and_then(|r| r.rollup());
         let (g, gs) = match rollup {
             Some(s) => status_glyph(s, app.spinner),
@@ -200,24 +193,24 @@ fn draw_sidebar(app: &mut App, f: &mut Frame, area: Rect) {
         let tabs = app.saved_tabs(&n.id);
         let bar = if selected && focused { "▌" } else { " " };
         let id_style = match rollup {
-            Some(ClaudeStatus::Attention) => Style::new().fg(AMBER).add_modifier(Modifier::BOLD),
-            _ if selected => Style::new().fg(Color::White).add_modifier(Modifier::BOLD),
-            _ => Style::new().fg(FG).add_modifier(Modifier::BOLD),
+            Some(ClaudeStatus::Attention) => Style::new().fg(colors().amber).add_modifier(Modifier::BOLD),
+            _ if selected => Style::new().fg(colors().fg_strong).add_modifier(Modifier::BOLD),
+            _ => Style::new().fg(colors().fg).add_modifier(Modifier::BOLD),
         };
         let count = if tabs > 0 { format!("{tabs}▤ ") } else { String::new() };
         let left_w = 3 + n.id.chars().count();
         let pad = w.saturating_sub(left_w + count.chars().count());
         let l1 = Line::from(vec![
-            Span::styled(bar, Style::new().fg(ACCENT)),
+            Span::styled(bar, Style::new().fg(colors().accent)),
             Span::styled(format!("{g} "), gs),
             Span::styled(truncate(&n.id, w.saturating_sub(8)), id_style),
             Span::raw(" ".repeat(pad)),
-            Span::styled(count, Style::new().fg(FG_DIM)),
+            Span::styled(count, Style::new().fg(colors().fg_dim)),
         ]);
         let l2 = Line::from(vec![
-            Span::styled(bar, Style::new().fg(ACCENT)),
+            Span::styled(bar, Style::new().fg(colors().accent)),
             Span::raw("  "),
-            Span::styled(truncate(&n.title, w.saturating_sub(4)), Style::new().fg(if selected { FG } else { FG_DIM })),
+            Span::styled(truncate(&n.title, w.saturating_sub(4)), Style::new().fg(if selected { colors().fg } else { colors().fg_dim })),
         ]);
         f.render_widget(Paragraph::new(vec![l1, l2]).style(Style::new().bg(bg)), r);
         app.item_hits.push((r, n.id.clone()));
@@ -226,17 +219,17 @@ fn draw_sidebar(app: &mut App, f: &mut Frame, area: Rect) {
     let p = app.prefix_label();
     let foot_text = if focused {
         vec![
-            Line::from(Span::styled(" ⏎ open c claude t shell e note", Style::new().fg(FG_DIM))),
-            Line::from(Span::styled(" o obsidian d done n new ? keys", Style::new().fg(FG_DIM))),
-            Line::from(Span::styled(" x close tab p default dir q quit", Style::new().fg(FG_DIM))),
-            Line::from(Span::styled(" z suspend R reopen closed", Style::new().fg(FG_DIM))),
+            Line::from(Span::styled(" ⏎ open c claude t shell e note", Style::new().fg(colors().fg_dim))),
+            Line::from(Span::styled(" o obsidian d done n new ? keys", Style::new().fg(colors().fg_dim))),
+            Line::from(Span::styled(" x close tab p default dir q quit", Style::new().fg(colors().fg_dim))),
+            Line::from(Span::styled(" z suspend R reopen closed", Style::new().fg(colors().fg_dim))),
         ]
     } else {
         vec![
-            Line::from(Span::styled(format!(" {p} s sidebar {p} j/k issue"), Style::new().fg(FG_DIM))),
-            Line::from(Span::styled(format!(" {p} 1-9 tab {p} c new {p} ?"), Style::new().fg(FG_DIM))),
-            Line::from(Span::styled(format!(" {p} x close {p} q quit {p} p dir"), Style::new().fg(FG_DIM))),
-            Line::from(Span::styled(format!(" {p} z suspend {p} R reopen"), Style::new().fg(FG_DIM))),
+            Line::from(Span::styled(format!(" {p} s sidebar {p} j/k issue"), Style::new().fg(colors().fg_dim))),
+            Line::from(Span::styled(format!(" {p} 1-9 tab {p} c new {p} ?"), Style::new().fg(colors().fg_dim))),
+            Line::from(Span::styled(format!(" {p} x close {p} q quit {p} p dir"), Style::new().fg(colors().fg_dim))),
+            Line::from(Span::styled(format!(" {p} z suspend {p} R reopen"), Style::new().fg(colors().fg_dim))),
         ]
     };
     f.render_widget(Paragraph::new(foot_text), foot);
@@ -245,19 +238,19 @@ fn draw_sidebar(app: &mut App, f: &mut Frame, area: Rect) {
 fn draw_tabbar(app: &mut App, f: &mut Frame, area: Rect) {
     app.tab_hits.clear();
     app.close_hits.clear();
-    f.render_widget(Block::new().style(Style::new().bg(Color::Rgb(16, 16, 20))), area);
+    f.render_widget(Block::new().style(Style::new().bg(colors().bg_tabbar)), area);
     let Some((tabs, active)) = app.current_tabs() else {
         let msg = if app.selected.is_some() {
             " no tabs — ⏎ start Claude · c claude · t shell · e note"
         } else {
             ""
         };
-        f.render_widget(Paragraph::new(Span::styled(msg, Style::new().fg(FG_DIM))), area);
+        f.render_widget(Paragraph::new(Span::styled(msg, Style::new().fg(colors().fg_dim))), area);
         return;
     };
     if tabs.is_empty() {
         f.render_widget(
-            Paragraph::new(Span::styled(" no tabs — ⏎ start Claude · c claude · t shell · e note", Style::new().fg(FG_DIM))),
+            Paragraph::new(Span::styled(" no tabs — ⏎ start Claude · c claude · t shell · e note", Style::new().fg(colors().fg_dim))),
             area,
         );
         return;
@@ -272,13 +265,13 @@ fn draw_tabbar(app: &mut App, f: &mut Frame, area: Rect) {
         let (g, gs) = tab_glyph(t, app.current_rt(), app.spinner);
         let is_active = i == active;
         let attention = t.st.kind == TabKind::Claude && t.pane.is_some() && t.shown_status() == ClaudeStatus::Attention;
-        let bg = if is_active { BG_TAB_ACTIVE } else { BG_TAB };
+        let bg = if is_active { colors().bg_tab_active } else { colors().bg_tab };
         let fg = if attention {
-            AMBER
+            colors().amber
         } else if is_active {
-            Color::White
+            colors().fg_strong
         } else {
-            Color::Rgb(160, 160, 172)
+            colors().fg_tab
         };
         let label = truncate(&format!("{}:{}", i + 1, t.st.name), max_w.saturating_sub(6));
         let text_style = Style::new().fg(fg).bg(bg).add_modifier(if is_active { Modifier::BOLD } else { Modifier::empty() });
@@ -286,11 +279,11 @@ fn draw_tabbar(app: &mut App, f: &mut Frame, area: Rect) {
             Span::styled(" ", Style::new().bg(bg)),
             Span::styled(g, gs.bg(bg)),
             Span::styled(format!(" {label} "), text_style),
-            Span::styled("× ", Style::new().fg(FG_DIM).bg(bg)),
+            Span::styled("× ", Style::new().fg(colors().fg_dim).bg(bg)),
         ];
         let width: u16 = parts.iter().map(|s| s.width() as u16).sum();
         if x + width > area.x + area.width {
-            spans.push(Span::styled(" …", Style::new().fg(FG_DIM)));
+            spans.push(Span::styled(" …", Style::new().fg(colors().fg_dim)));
             break;
         }
         hits.push((Rect { x, y: area.y, width, height: 1 }, i));
@@ -324,7 +317,7 @@ fn draw_terminal(app: &mut App, f: &mut Frame, area: Rect) {
         f.render_widget(
             Paragraph::new(text)
                 .alignment(Alignment::Center)
-                .style(Style::new().fg(FG_DIM))
+                .style(Style::new().fg(colors().fg_dim))
                 .wrap(Wrap { trim: false }),
             centered(area, area.width.saturating_sub(4), 9),
         );
@@ -351,7 +344,7 @@ fn draw_terminal(app: &mut App, f: &mut Frame, area: Rect) {
         f.render_widget(
             Paragraph::new(text)
                 .alignment(Alignment::Center)
-                .style(Style::new().fg(FG_DIM))
+                .style(Style::new().fg(colors().fg_dim))
                 .wrap(Wrap { trim: false }),
             centered(area, area.width.saturating_sub(4), h),
         );
@@ -367,7 +360,7 @@ fn draw_terminal(app: &mut App, f: &mut Frame, area: Rect) {
         }
         f.render_widget(PseudoTerminal::new(parser.screen()).cursor(cursor), area);
         if let Some(sel) = &pane.selection {
-            let style = Style::new().fg(Color::Black).bg(ACCENT);
+            let style = Style::new().fg(colors().on_accent).bg(colors().accent);
             for (row, from, to) in sel.spans(&mut parser) {
                 f.buffer_mut().set_style(Rect::new(area.x + from, area.y + row, to - from, 1).intersection(area), style);
             }
@@ -378,7 +371,7 @@ fn draw_terminal(app: &mut App, f: &mut Frame, area: Rect) {
         f.render_widget(Clear, r);
         f.render_widget(
             Paragraph::new(format!(" process exited ({code}) — ⏎ restart{} · {} x close", if tab.st.claude_session.is_some() { "/resume" } else { "" }, app.prefix_label()))
-                .style(Style::new().fg(Color::Black).bg(AMBER)),
+                .style(Style::new().fg(colors().on_accent).bg(colors().amber)),
             r,
         );
     } else if scroll > 0 {
@@ -395,7 +388,7 @@ fn draw_snapshot(snap: &Snapshot, prefix: &str, f: &mut Frame, area: Rect) {
     f.render_widget(PseudoTerminal::new(snap.parser.screen()).cursor(cursor), screen);
     f.render_widget(
         Paragraph::new(format!(" – suspended · read-only · ⏎ resume · ↑↓ scroll · {prefix} x close"))
-            .style(Style::new().fg(Color::Black).bg(ACCENT)),
+            .style(Style::new().fg(colors().on_accent).bg(colors().accent)),
         bar,
     );
     if snap.scroll > 0 {
@@ -407,21 +400,21 @@ fn draw_scroll_label(f: &mut Frame, area: Rect, scroll: usize) {
     let label = format!(" ↑ {scroll} ");
     let w = label.len() as u16;
     let r = Rect { x: area.x + area.width.saturating_sub(w), y: area.y, width: w, height: 1 };
-    f.render_widget(Paragraph::new(label).style(Style::new().fg(Color::Black).bg(ACCENT)), r);
+    f.render_widget(Paragraph::new(label).style(Style::new().fg(colors().on_accent).bg(colors().accent)), r);
 }
 
 fn draw_statusbar(app: &mut App, f: &mut Frame, area: Rect) {
-    f.render_widget(Block::new().style(Style::new().bg(Color::Rgb(28, 28, 34))), area);
+    f.render_widget(Block::new().style(Style::new().bg(colors().bg_status)), area);
     let mut left = vec![];
     if app.mode == Mode::Prefix {
-        left.push(Span::styled(format!(" {} ", app.prefix_label()), Style::new().fg(Color::Black).bg(ORANGE).add_modifier(Modifier::BOLD)));
+        left.push(Span::styled(format!(" {} ", app.prefix_label()), Style::new().fg(colors().on_accent).bg(colors().orange).add_modifier(Modifier::BOLD)));
     }
     if let Some((m, _)) = &app.msg {
-        let color = if app.msg_error { RED } else { AMBER };
+        let color = if app.msg_error { colors().red } else { colors().amber };
         left.push(Span::styled(format!(" {m}"), Style::new().fg(color)));
     } else if let Some(n) = app.selected_note() {
-        left.push(Span::styled(format!(" {} ", n.id), Style::new().fg(GREEN).add_modifier(Modifier::BOLD)));
-        left.push(Span::styled(n.title.clone(), Style::new().fg(FG)));
+        left.push(Span::styled(format!(" {} ", n.id), Style::new().fg(colors().green).add_modifier(Modifier::BOLD)));
+        left.push(Span::styled(n.title.clone(), Style::new().fg(colors().fg)));
     }
     let wt = app
         .current_rt()
@@ -438,7 +431,7 @@ fn draw_statusbar(app: &mut App, f: &mut Frame, area: Rect) {
     let rw = right.chars().count() as u16;
     f.render_widget(Paragraph::new(Line::from(left)), Rect { width: area.width.saturating_sub(rw + 1), ..area });
     f.render_widget(
-        Paragraph::new(Span::styled(right, Style::new().fg(FG_DIM))).alignment(Alignment::Right),
+        Paragraph::new(Span::styled(right, Style::new().fg(colors().fg_dim))).alignment(Alignment::Right),
         area,
     );
 }
@@ -464,13 +457,13 @@ fn draw_prompt(f: &mut Frame, area: Rect, title: &str, body: &str, matches: Opti
     let r = centered(area, 70, 3 + rows as u16);
     let width = r.width.saturating_sub(2) as usize;
     f.render_widget(Clear, r);
-    let mut b = Block::bordered().border_type(BorderType::Rounded).title(title).border_style(Style::new().fg(ACCENT));
+    let mut b = Block::bordered().border_type(BorderType::Rounded).title(title).border_style(Style::new().fg(colors().accent));
     let mut lines = vec![Line::raw(tail(&format!("{body}▏"), width))];
     if let Some(m) = matches {
         let start = m.selected.map_or(0, |s| (s + 1).saturating_sub(rows));
         for (i, name) in m.names.iter().enumerate().skip(start).take(rows) {
             let name = truncate(name, width);
-            let style = if m.selected == Some(i) { Style::new().bg(BG_SEL) } else { Style::new().fg(FG_DIM) };
+            let style = if m.selected == Some(i) { Style::new().bg(colors().bg_sel) } else { Style::new().fg(colors().fg_dim) };
             lines.push(Line::styled(format!("{name:<width$}"), style));
         }
         if m.names.len() > rows {
@@ -478,7 +471,7 @@ fn draw_prompt(f: &mut Frame, area: Rect, title: &str, body: &str, matches: Opti
             b = b.title_bottom(Line::raw(format!(" {at}/{} ", m.names.len())).right_aligned());
         }
     }
-    f.render_widget(Paragraph::new(lines).block(b).style(Style::new().fg(FG).bg(BG_SIDE)), r);
+    f.render_widget(Paragraph::new(lines).block(b).style(Style::new().fg(colors().fg).bg(colors().bg_side)), r);
 }
 
 fn draw_help(app: &App, f: &mut Frame, area: Rect) {
@@ -516,11 +509,11 @@ fn draw_help(app: &App, f: &mut Frame, area: Rect) {
         .iter()
         .map(|(k, v)| {
             if v.is_empty() {
-                Line::from(Span::styled(k.clone(), Style::new().fg(ACCENT).add_modifier(Modifier::BOLD)))
+                Line::from(Span::styled(k.clone(), Style::new().fg(colors().accent).add_modifier(Modifier::BOLD)))
             } else {
                 Line::from(vec![
-                    Span::styled(format!("  {k:<14}"), Style::new().fg(FG).add_modifier(Modifier::BOLD)),
-                    Span::styled(v.to_string(), Style::new().fg(FG_DIM)),
+                    Span::styled(format!("  {k:<14}"), Style::new().fg(colors().fg).add_modifier(Modifier::BOLD)),
+                    Span::styled(v.to_string(), Style::new().fg(colors().fg_dim)),
                 ])
             }
         })
@@ -529,8 +522,8 @@ fn draw_help(app: &App, f: &mut Frame, area: Rect) {
     f.render_widget(Clear, r);
     f.render_widget(
         Paragraph::new(lines)
-            .block(Block::bordered().border_type(BorderType::Rounded).title(" Keys — any key to close ").border_style(Style::new().fg(ACCENT)))
-            .style(Style::new().bg(BG_SIDE)),
+            .block(Block::bordered().border_type(BorderType::Rounded).title(" Keys — any key to close ").border_style(Style::new().fg(colors().accent)))
+            .style(Style::new().bg(colors().bg_side)),
         r,
     );
 }

@@ -61,6 +61,8 @@ pub struct Config {
     /// Capture the mouse (click sidebar/tabs, wheel and clicks in tabs, drag to copy in shell tabs).
     /// Elsewhere, hold Shift/Option to select text.
     pub mouse: bool,
+    /// "auto" (match the terminal's background), "dark" or "light".
+    pub theme: String,
     pub github: Vec<GithubSource>,
     pub jira: Vec<JiraSource>,
 }
@@ -89,6 +91,7 @@ impl Default for Config {
             local_repo: None,
             bell: true,
             mouse: true,
+            theme: "auto".into(),
             github: vec![],
             jira: vec![],
         }
@@ -120,6 +123,7 @@ prefix = "ctrl-a"
 # local_repo = "/path/to/repo" # worktrees for local issues
 # bell = true
 # mouse = true
+# theme = "auto"              # auto (follow the terminal) | dark | light
 
 # [[github]]
 # repo = "owner/transport-sim"
