@@ -26,6 +26,8 @@ use std::time::{Duration, Instant};
 const INTERRUPT_SETTLE_MS: i64 = 1500;
 /// Closed Claude tabs kept per issue for reopening.
 const MAX_CLOSED: usize = 10;
+/// The issue id of Scratch: tabs that belong to no issue. It has no note.
+pub const SCRATCH: &str = "scratch";
 
 pub struct Tab {
     pub st: TabState,
@@ -154,6 +156,10 @@ fn activity(kind: TabKind, status: Option<ClaudeStatus>) -> u8 {
         (TabKind::Shell, _) => 1,
         (TabKind::Notes, _) => 0,
     }
+}
+
+fn scratch_shown(tabs: usize, selected: bool) -> bool {
+    tabs > 0 || selected
 }
 
 /// Where a tab that needs the issue's checkout starts.
@@ -309,7 +315,10 @@ impl App {
         let hooks_settings = if cfg.inject_hooks { status::write_settings_file().ok() } else { None };
         let prefix = keys::parse_prefix(&cfg.prefix);
         let mut app = App {
-            selected: state.selected.clone().filter(|id| notes.iter().any(|n| &n.id == id)),
+            selected: state.selected.clone().filter(|id| {
+                notes.iter().any(|n| &n.id == id)
+                    || (id == SCRATCH && state.issues.get(SCRATCH).is_some_and(|s| !s.tabs.is_empty()))
+            }),
             cfg,
             vault,
             notes,
@@ -348,7 +357,7 @@ impl App {
             app.view = Stage::Todo;
         }
         if app.selected.is_none() {
-            app.selected = app.visible().first().map(|n| n.id.clone());
+            app.selected = app.rows().first().cloned();
         }
         if let Some(id) = app.selected.clone() {
             app.rt_for(&id);
@@ -416,6 +425,21 @@ impl App {
         .unwrap_or(0)
     }
 
+    /// Scratch shows while it has tabs, or while it's selected so a first tab can be opened.
+    pub fn shows_scratch(&self) -> bool {
+        scratch_shown(self.saved_tabs(SCRATCH), self.scratch_selected())
+    }
+
+    pub fn scratch_selected(&self) -> bool {
+        self.selected.as_deref() == Some(SCRATCH)
+    }
+
+    /// Ids of the sidebar rows: Scratch first in every view and sort, then the issues.
+    pub fn rows(&self) -> Vec<String> {
+        let scratch = self.shows_scratch().then(|| SCRATCH.to_string());
+        scratch.into_iter().chain(self.visible().iter().map(|n| n.id.clone())).collect()
+    }
+
     pub fn selected_note(&self) -> Option<&Note> {
         let id = self.selected.as_ref()?;
         self.notes.iter().find(|n| &n.id == id)
@@ -427,8 +451,8 @@ impl App {
 
     fn rescan(&mut self) {
         self.notes = self.vault.scan();
-        if self.selected_note().is_none() {
-            self.selected = self.visible().first().map(|n| n.id.clone());
+        if self.selected_note().is_none() && !self.scratch_selected() {
+            self.selected = self.rows().first().cloned();
         }
         self.last_scan = Instant::now();
     }
@@ -442,7 +466,7 @@ impl App {
     }
 
     fn move_selection(&mut self, delta: isize) {
-        let ids: Vec<String> = self.visible().iter().map(|n| n.id.clone()).collect();
+        let ids = self.rows();
         if ids.is_empty() {
             return;
         }
@@ -457,8 +481,9 @@ impl App {
 
     fn set_view(&mut self, st: Stage) {
         self.view = st;
-        if self.selected_note().map(|n| n.stage) != Some(st) {
-            if let Some(id) = self.visible().first().map(|n| n.id.clone()) {
+        // Scratch is in every view, so it stays selected.
+        if !self.scratch_selected() && self.selected_note().map(|n| n.stage) != Some(st) {
+            if let Some(id) = self.rows().first().cloned() {
                 self.select_id(id);
             } else {
                 self.selected = None;
@@ -469,7 +494,7 @@ impl App {
     fn move_stage(&mut self, st: Stage) {
         let Some(note) = self.selected_note().cloned() else { return };
         // Pick the neighbour before moving, so the cursor stays in place.
-        let ids: Vec<String> = self.visible().iter().map(|n| n.id.clone()).collect();
+        let ids = self.rows();
         let pos = ids.iter().position(|i| i == &note.id).unwrap_or(0);
         match self.vault.move_to(&note, st) {
             Ok(_) => {
@@ -690,14 +715,18 @@ impl App {
                 let rt = self.rt_for(&id);
                 // It may have been closed, or started elsewhere, while it waited.
                 if let Some(idx) = rt.tabs.iter().position(|t| t.st.id == tab && t.pane.is_none()) {
-                    self.start_pane(&note, idx, cwd.clone());
+                    self.start_pane(&id, Some(&note), idx, cwd.clone());
                 }
             }
         }
     }
 
     fn spawn_pane(&mut self, id: &str, idx: usize) {
-        let Some(note) = self.notes.iter().find(|n| n.id == id).cloned() else { return };
+        // Only Scratch has no note.
+        let note = self.notes.iter().find(|n| n.id == id).cloned();
+        if note.is_none() && id != SCRATCH {
+            return;
+        }
         let Some(tab) = self.rt_for(id).tabs.get(idx) else { return };
         let (kind, tab_id) = (tab.st.kind, tab.st.id.clone());
         // A session can only be resumed from the directory it started in.
@@ -709,7 +738,8 @@ impl App {
                 Some(p) => p,
                 None => self.default_dir(),
             },
-            None => match self.workdir(&note, &tab_id) {
+            // Scratch has no repo, so it starts where an issue with no repo would.
+            None => match note.as_ref().map_or(Workdir::NoRepo, |n| self.workdir(n, &tab_id)) {
                 Workdir::Ready(p) => p,
                 Workdir::Pending => return,
                 Workdir::NoRepo => {
@@ -722,11 +752,11 @@ impl App {
                 }
             },
         };
-        self.start_pane(&note, idx, cwd);
+        self.start_pane(id, note.as_ref(), idx, cwd);
     }
 
-    fn start_pane(&mut self, note: &Note, idx: usize, cwd: PathBuf) {
-        let id = note.id.as_str();
+    /// Start a tab's process. `note` is None only for Scratch.
+    fn start_pane(&mut self, id: &str, note: Option<&Note>, idx: usize, cwd: PathBuf) {
         let (rows, cols) = (self.term_rect.height.max(5), self.term_rect.width.max(20));
         let rt = self.rt_for(id);
         let Some(tab) = rt.tabs.get_mut(idx) else { return };
@@ -749,6 +779,7 @@ impl App {
             }
             TabKind::Shell => self.cfg.shell(),
             TabKind::Notes => {
+                let Some(note) = note else { return };
                 let mut v = self.cfg.editor();
                 v.push(note.path.to_string_lossy().into_owned());
                 v
@@ -756,9 +787,11 @@ impl App {
         };
         let mut env = vec![
             ("SALASH_TAB".to_string(), st.id.clone()),
-            ("SALASH_ISSUE".to_string(), note.id.clone()),
-            ("SALASH_NOTE".to_string(), note.path.to_string_lossy().into_owned()),
+            ("SALASH_ISSUE".to_string(), id.to_string()),
         ];
+        if let Some(note) = note {
+            env.push(("SALASH_NOTE".to_string(), note.path.to_string_lossy().into_owned()));
+        }
         if let Ok(exe) = std::env::current_exe() {
             env.push(("SALASH_BIN".to_string(), exe.to_string_lossy().into_owned()));
         }
@@ -786,6 +819,10 @@ impl App {
             self.flash("Select an issue first".into());
             return;
         };
+        if kind == TabKind::Notes && id == SCRATCH {
+            self.flash("Scratch has no note".into());
+            return;
+        }
         if kind == TabKind::Claude {
             self.start_work(&id);
         }
@@ -845,7 +882,11 @@ impl App {
         if let Err(e) = req.check() {
             return Reply::err(format!("{e:#}"));
         }
-        if !self.notes.iter().any(|n| n.id == req.issue) {
+        if req.issue == SCRATCH {
+            if req.kind == TabKind::Notes {
+                return Reply::err("scratch has no note");
+            }
+        } else if !self.notes.iter().any(|n| n.id == req.issue) {
             return Reply::err(format!("no issue {}", req.issue));
         }
         let args = if req.kind == TabKind::Claude { req.claude_args() } else { vec![] };
@@ -982,10 +1023,18 @@ impl App {
         } else {
             state::remove_snapshot(&t.st.id);
         }
-        if rt.tabs.is_empty() && self.selected.as_deref() == Some(id) {
-            self.focus = Focus::Sidebar;
-        }
+        let emptied = rt.tabs.is_empty() && self.selected.as_deref() == Some(id);
         self.persist(id);
+        if emptied {
+            self.focus = Focus::Sidebar;
+            // An empty Scratch hides, so move to the first issue.
+            if id == SCRATCH {
+                self.selected = self.visible().first().map(|n| n.id.clone());
+                if let Some(next) = self.selected.clone() {
+                    self.select_id(next);
+                }
+            }
+        }
         reopenable
     }
 
@@ -1635,6 +1684,10 @@ impl App {
                     }
                 }
             }
+            KeyCode::Char('`') => {
+                self.select_id(SCRATCH.into());
+                self.focus = if self.can_focus_terminal() { Focus::Terminal } else { Focus::Sidebar };
+            }
             KeyCode::Char('q') => self.mode = Mode::Confirm(ConfirmKind::Quit),
             KeyCode::Char('?') => self.mode = Mode::Help,
             _ => return false,
@@ -1831,6 +1884,13 @@ mod tests {
         assert!(t.suspended());
         t.st.kind = TabKind::Shell;
         assert!(!t.suspended());
+    }
+
+    #[test]
+    fn scratch_hides_while_empty_and_unselected() {
+        assert!(!scratch_shown(0, false));
+        assert!(scratch_shown(0, true));
+        assert!(scratch_shown(2, false));
     }
 
     #[test]

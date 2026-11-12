@@ -1,4 +1,4 @@
-use crate::app::{App, ConfirmKind, Focus, IssueRt, Mode, PromptKind, Tab};
+use crate::app::{App, ConfirmKind, Focus, IssueRt, Mode, PromptKind, Tab, SCRATCH};
 use crate::complete::Completion;
 use crate::state::{SortMode, TabKind};
 use crate::status::ClaudeStatus;
@@ -168,18 +168,22 @@ fn draw_sidebar(app: &mut App, f: &mut Frame, area: Rect) {
     }
     f.render_widget(Paragraph::new(Line::from(st)), Rect { height: 1, ..stages });
 
-    // Issue list, two lines per issue.
+    // Issue list, two lines per issue, with Scratch first: (id shown, title, row id).
     app.item_hits.clear();
-    let notes: Vec<_> = app.visible().into_iter().cloned().collect();
+    let scratch = app.shows_scratch().then(|| ("Scratch".to_string(), "tabs outside any issue".to_string(), SCRATCH.to_string()));
+    let rows: Vec<_> = scratch
+        .into_iter()
+        .chain(app.visible().into_iter().map(|n| (n.id.clone(), n.title.clone(), n.id.clone())))
+        .collect();
     let per_page = (list.height / 2).max(1) as usize;
     let sel_idx = app
         .selected
         .as_ref()
-        .and_then(|s| notes.iter().position(|n| &n.id == s))
+        .and_then(|s| rows.iter().position(|r| &r.2 == s))
         .unwrap_or(0);
     let offset = sel_idx.saturating_sub(per_page - 1);
     let w = list.width as usize;
-    if notes.is_empty() {
+    if rows.is_empty() {
         let hint = match app.view {
             Stage::Todo => " Nothing to do.\n n  new local issue\n S  sync GitHub/Jira",
             Stage::Active => " Nothing in progress.\n c  on a To-do issue starts it\n u  move an issue here",
@@ -187,17 +191,17 @@ fn draw_sidebar(app: &mut App, f: &mut Frame, area: Rect) {
         };
         f.render_widget(Paragraph::new(hint).style(Style::new().fg(FG_DIM)), list);
     }
-    for (row, n) in notes.iter().enumerate().skip(offset).take(per_page) {
+    for (row, (label, title, id)) in rows.iter().enumerate().skip(offset).take(per_page) {
         let y = list.y + ((row - offset) * 2) as u16;
         let r = Rect { x: list.x, y, width: list.width, height: 2 };
-        let selected = app.selected.as_deref() == Some(n.id.as_str());
+        let selected = app.selected.as_deref() == Some(id.as_str());
         let bg = if selected { BG_SEL } else { BG_SIDE };
-        let rollup = app.rt.get(&n.id).and_then(|r| r.rollup());
+        let rollup = app.rt.get(id).and_then(|r| r.rollup());
         let (g, gs) = match rollup {
             Some(s) => status_glyph(s, app.spinner),
             None => (" ", Style::new()),
         };
-        let tabs = app.saved_tabs(&n.id);
+        let tabs = app.saved_tabs(id);
         let bar = if selected && focused { "▌" } else { " " };
         let id_style = match rollup {
             Some(ClaudeStatus::Attention) => Style::new().fg(AMBER).add_modifier(Modifier::BOLD),
@@ -205,22 +209,22 @@ fn draw_sidebar(app: &mut App, f: &mut Frame, area: Rect) {
             _ => Style::new().fg(FG).add_modifier(Modifier::BOLD),
         };
         let count = if tabs > 0 { format!("{tabs}▤ ") } else { String::new() };
-        let left_w = 3 + n.id.chars().count();
+        let left_w = 3 + label.chars().count();
         let pad = w.saturating_sub(left_w + count.chars().count());
         let l1 = Line::from(vec![
             Span::styled(bar, Style::new().fg(ACCENT)),
             Span::styled(format!("{g} "), gs),
-            Span::styled(truncate(&n.id, w.saturating_sub(8)), id_style),
+            Span::styled(truncate(label, w.saturating_sub(8)), id_style),
             Span::raw(" ".repeat(pad)),
             Span::styled(count, Style::new().fg(FG_DIM)),
         ]);
         let l2 = Line::from(vec![
             Span::styled(bar, Style::new().fg(ACCENT)),
             Span::raw("  "),
-            Span::styled(truncate(&n.title, w.saturating_sub(4)), Style::new().fg(if selected { FG } else { FG_DIM })),
+            Span::styled(truncate(title, w.saturating_sub(4)), Style::new().fg(if selected { FG } else { FG_DIM })),
         ]);
         f.render_widget(Paragraph::new(vec![l1, l2]).style(Style::new().bg(bg)), r);
-        app.item_hits.push((r, n.id.clone()));
+        app.item_hits.push((r, id.clone()));
     }
 
     let p = app.prefix_label();
@@ -229,7 +233,7 @@ fn draw_sidebar(app: &mut App, f: &mut Frame, area: Rect) {
             Line::from(Span::styled(" ⏎ open c claude t shell e note", Style::new().fg(FG_DIM))),
             Line::from(Span::styled(" o obsidian d done n new ? keys", Style::new().fg(FG_DIM))),
             Line::from(Span::styled(" x close tab p default dir q quit", Style::new().fg(FG_DIM))),
-            Line::from(Span::styled(" z suspend R reopen closed", Style::new().fg(FG_DIM))),
+            Line::from(Span::styled(" z suspend R reopen ` scratch", Style::new().fg(FG_DIM))),
         ]
     } else {
         vec![
@@ -246,22 +250,15 @@ fn draw_tabbar(app: &mut App, f: &mut Frame, area: Rect) {
     app.tab_hits.clear();
     app.close_hits.clear();
     f.render_widget(Block::new().style(Style::new().bg(Color::Rgb(16, 16, 20))), area);
-    let Some((tabs, active)) = app.current_tabs() else {
-        let msg = if app.selected.is_some() {
-            " no tabs — ⏎ start Claude · c claude · t shell · e note"
-        } else {
-            ""
-        };
-        f.render_widget(Paragraph::new(Span::styled(msg, Style::new().fg(FG_DIM))), area);
+    let hint = match app.selected.as_deref() {
+        Some(SCRATCH) => " no tabs — ⏎ start Claude · c claude · t shell",
+        Some(_) => " no tabs — ⏎ start Claude · c claude · t shell · e note",
+        None => "",
+    };
+    let Some((tabs, active)) = app.current_tabs().filter(|(t, _)| !t.is_empty()) else {
+        f.render_widget(Paragraph::new(Span::styled(hint, Style::new().fg(FG_DIM))), area);
         return;
     };
-    if tabs.is_empty() {
-        f.render_widget(
-            Paragraph::new(Span::styled(" no tabs — ⏎ start Claude · c claude · t shell · e note", Style::new().fg(FG_DIM))),
-            area,
-        );
-        return;
-    }
     let n = tabs.len().max(1) as u16;
     let max_w = ((area.width / n).saturating_sub(1)).clamp(10, 30) as usize;
     let mut spans = vec![];
@@ -318,6 +315,10 @@ fn draw_terminal(app: &mut App, f: &mut Frame, area: Rect) {
                 n.id,
                 n.title,
                 n.path.display()
+            ),
+            None if app.scratch_selected() => format!(
+                "Scratch: shells and Claude sessions outside any issue\n\nThey start in {}\n\n⏎ / c  new Claude tab   C  …in a chosen directory\nt  shell tab",
+                crate::config::shorten(&app.default_dir())
             ),
             None => "Select or create an issue (n).".into(),
         };
@@ -422,6 +423,8 @@ fn draw_statusbar(app: &mut App, f: &mut Frame, area: Rect) {
     } else if let Some(n) = app.selected_note() {
         left.push(Span::styled(format!(" {} ", n.id), Style::new().fg(GREEN).add_modifier(Modifier::BOLD)));
         left.push(Span::styled(n.title.clone(), Style::new().fg(FG)));
+    } else if app.scratch_selected() {
+        left.push(Span::styled(" Scratch ", Style::new().fg(GREEN).add_modifier(Modifier::BOLD)));
     }
     let wt = app
         .current_rt()
@@ -499,6 +502,7 @@ fn draw_help(app: &App, f: &mut Frame, area: Rect) {
         ("p".into(), "set default directory (no-repo issues)"),
         ("1-9, h/l".into(), "go to tab, prev/next tab"),
         ("j / k".into(), "next/prev issue"),
+        ("`".into(), "Scratch: tabs outside any issue"),
         ("x  ,".into(), "close tab, rename tab"),
         ("z / R".into(), "suspend Claude tab / reopen closed tab"),
         ("o / w".into(), "open note in Obsidian / issue in browser"),
