@@ -9,6 +9,7 @@ mod providers;
 mod state;
 mod status;
 mod term;
+mod theme;
 mod transcript;
 mod ui;
 mod vault;
@@ -182,6 +183,8 @@ fn main() -> Result<()> {
 fn run_tui() -> Result<()> {
     let (cfg, first_run) = config::Config::load()?;
     let mouse = cfg.mouse;
+    // Asks the terminal for its background, so it must run before the TUI reads stdin.
+    theme::init(&cfg.theme);
     let mut app = app::App::new(cfg, first_run)?;
 
     let mut terminal = ratatui::init();
