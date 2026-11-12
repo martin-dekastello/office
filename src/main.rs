@@ -1,11 +1,15 @@
 #![allow(clippy::collapsible_if)]
 mod api;
 mod app;
+mod client;
 mod clipboard;
 mod complete;
 mod config;
+mod instance;
 mod keys;
+mod proto;
 mod providers;
+mod server;
 mod state;
 mod status;
 mod term;
@@ -17,21 +21,32 @@ mod worktree;
 
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
-use crossterm::event::{
-    DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
-    KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
-};
-use crossterm::execute;
+use instance::Instance;
+use std::path::PathBuf;
 
 #[derive(Parser)]
-#[command(name = "salash", version, about = "Issues on the left, Claude Code tabs on the right, notes in Obsidian.")]
+#[command(
+    name = "salash",
+    version,
+    about = "Issues on the left, Claude Code tabs on the right, notes in Obsidian.",
+    args_conflicts_with_subcommands = true
+)]
 struct Cli {
     #[command(subcommand)]
     cmd: Option<Cmd>,
+    /// Folder to run salash in (default: the current directory). One salash
+    /// runs per folder, in the background; its state lives in <folder>/.salash.
+    folder: Option<PathBuf>,
+    /// Attach to the salash already running in the folder.
+    #[arg(long, short)]
+    attach: bool,
 }
 
 #[derive(Subcommand)]
 enum Cmd {
+    /// Run a folder's salash in the foreground, without a terminal (started by `salash`).
+    #[command(hide = true)]
+    Server { folder: PathBuf },
     /// Called by Claude Code hooks (reads the hook JSON on stdin).
     Hook,
     /// Add salash status hooks to ~/.claude/settings.json (only needed if inject_hooks = false).
@@ -74,6 +89,10 @@ enum TabCmd {
         /// File whose text is Claude's first prompt.
         #[arg(long)]
         prompt_file: Option<std::path::PathBuf>,
+        /// Folder of the salash to open it in; defaults to this tab's salash,
+        /// else the nearest folder above with a .salash.
+        #[arg(long)]
+        folder: Option<PathBuf>,
     },
 }
 
@@ -86,9 +105,24 @@ enum TabKindArg {
 
 const SKILL: &str = include_str!("../skills/new-salash-tab/SKILL.md");
 
+/// The salash a command run here belongs to, if any. Its data dir applies
+/// from here on.
+fn here() -> Option<Instance> {
+    let inst = Instance::find(&std::env::current_dir().ok()?)?;
+    config::set_data_dir(inst.dir.clone());
+    Some(inst)
+}
+
+/// The config, with the folder's own on top when run inside one.
+fn load_config() -> Result<config::Config> {
+    let inst = here();
+    Ok(config::Config::load_for(inst.as_ref().map(|i| i.dir.as_path()))?.0)
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.cmd {
+        Some(Cmd::Server { folder }) => server::run(Instance::new(Some(&folder))?),
         Some(Cmd::Hook) => {
             let _ = status::run_hook();
             Ok(())
@@ -99,7 +133,7 @@ fn main() -> Result<()> {
             Ok(())
         }
         Some(Cmd::New { title }) => {
-            let (cfg, _) = config::Config::load()?;
+            let cfg = load_config()?;
             let v = vault::Vault::new(cfg.notes_root())?;
             let id = v.next_local_id(&cfg.local_prefix);
             let title = title.join(" ");
@@ -108,7 +142,7 @@ fn main() -> Result<()> {
             Ok(())
         }
         Some(Cmd::Sync) => {
-            let (cfg, _) = config::Config::load()?;
+            let cfg = load_config()?;
             let v = vault::Vault::new(cfg.notes_root())?;
             let rep = providers::fetch_all(&providers::from_config(&cfg));
             for i in &rep.fetched {
@@ -131,7 +165,7 @@ fn main() -> Result<()> {
             Ok(())
         }
         Some(Cmd::List) => {
-            let (cfg, _) = config::Config::load()?;
+            let cfg = load_config()?;
             let v = vault::Vault::new(cfg.notes_root())?;
             for n in v.scan() {
                 println!("{:<8} {:<16} {}", n.stage.dir(), n.id, n.title);
@@ -139,14 +173,26 @@ fn main() -> Result<()> {
             Ok(())
         }
         Some(Cmd::Paths) => {
-            let (cfg, _) = config::Config::load()?;
+            let inst = here();
+            let cfg = config::Config::load_for(inst.as_ref().map(|i| i.dir.as_path()))?.0;
+            if let Some(i) = &inst {
+                println!("folder  {}", i.folder.display());
+                #[cfg(unix)]
+                println!("socket  {}", i.socket_path().display());
+            }
             println!("config  {}", config::config_path().display());
             println!("data    {}", config::data_dir().display());
             println!("notes   {}", cfg.notes_root().display());
             println!("worktrees {}", cfg.worktrees_dir.display());
             Ok(())
         }
-        Some(Cmd::Tab { cmd: TabCmd::New { issue, kind, cwd, name, mode, prompt_file } }) => {
+        Some(Cmd::Tab { cmd: TabCmd::New { issue, kind, cwd, name, mode, prompt_file, folder } }) => {
+            match folder {
+                Some(f) => config::set_data_dir(Instance::new(Some(&f))?.dir),
+                None => {
+                    here();
+                }
+            }
             let issue = issue
                 .or_else(|| std::env::var("SALASH_ISSUE").ok())
                 .context("not inside a salash tab: pass --issue")?;
@@ -176,41 +222,9 @@ fn main() -> Result<()> {
             println!("Skill written to {}", p.display());
             Ok(())
         }
-        None => run_tui(),
+        None => {
+            let inst = Instance::new(cli.folder.as_deref())?;
+            if cli.attach { client::attach(&inst) } else { client::start(&inst) }
+        }
     }
-}
-
-fn run_tui() -> Result<()> {
-    let (cfg, first_run) = config::Config::load()?;
-    let mouse = cfg.mouse;
-    // Asks the terminal for its background, so it must run before the TUI reads stdin.
-    theme::init(&cfg.theme);
-    let mut app = app::App::new(cfg, first_run)?;
-
-    let mut terminal = ratatui::init();
-    let mut out = std::io::stdout();
-    let _ = execute!(out, EnableBracketedPaste);
-    if mouse {
-        let _ = execute!(out, EnableMouseCapture);
-    }
-    let enhanced = matches!(crossterm::terminal::supports_keyboard_enhancement(), Ok(true));
-    if enhanced {
-        let _ = execute!(
-            out,
-            PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
-        );
-    }
-
-    let res = app::run(&mut app, &mut terminal);
-
-    if enhanced {
-        let _ = execute!(out, PopKeyboardEnhancementFlags);
-    }
-    if mouse {
-        let _ = execute!(out, DisableMouseCapture);
-    }
-    let _ = execute!(out, DisableBracketedPaste);
-    ratatui::restore();
-    drop(app); // kills child processes
-    res
 }
