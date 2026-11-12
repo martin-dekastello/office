@@ -348,6 +348,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "coolor"
+version = "1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "980c2afde4af43d6a05c5be738f9eae595cff86dce1f38f88b95058a98c027f3"
+
+[[package]]
 name = "core-foundation-sys"
 version = "0.8.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1781,6 +1787,7 @@ dependencies = [
  "ratatui",
  "serde",
  "serde_json",
+ "terminal-light",
  "toml",
  "tui-term",
  "ureq",
@@ -2065,6 +2072,18 @@ dependencies = [
  "rustix",
  "signal-hook",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "terminal-light"
+version = "1.9.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "23493cf1be461ed14d2c81bf1d39dcea17c8095d4f623b1a1292ea212f6b88ed"
+dependencies = [
+ "coolor",
+ "crossterm",
+ "thiserror 2.0.21",
+ "xterm-query",
 ]
 
 [[package]]
@@ -2666,6 +2685,15 @@ dependencies = [
 
 [[package]]
 name = "windows-sys"
+version = "0.59.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1e38bc4d79ed67fd075bcc251a1c39b32a1776bbe92e5bef1f0bf1f8c531853b"
+dependencies = [
+ "windows-targets",
+]
+
+[[package]]
+name = "windows-sys"
 version = "0.61.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ae137229bcbd6cdf0f7b80a31df61766145077ddf49416a728b02cb3921ff3fc"
@@ -2763,6 +2791,17 @@ name = "writeable"
 version = "0.6.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3ad82d2a33cdc9674dc7465672f271e096168fcdbe0f799d9e6db8c5892679dc"
+
+[[package]]
+name = "xterm-query"
+version = "0.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "db3cad17d6cbdca6eaf31f1cc8c0b624cde2266261e8b5573c13081bd8a09eb5"
+dependencies = [
+ "nix 0.31.3",
+ "thiserror 2.0.21",
+ "windows-sys 0.59.0",
+]
 
 [[package]]
 name = "yoke"

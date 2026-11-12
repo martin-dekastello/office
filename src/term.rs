@@ -45,6 +45,19 @@ impl vt100::Callbacks for Callbacks {
             _ => {}
         }
     }
+    /// Foreground/background colour queries, so programs can pick a light or
+    /// dark look. Like tmux, answer with the outer terminal's colours.
+    fn unhandled_osc(&mut self, _: &mut vt100::Screen, params: &[&[u8]]) {
+        let theme = crate::theme::get();
+        let (r, g, b) = match params {
+            [b"10", b"?"] => theme.pane_fg,
+            [b"11", b"?"] => theme.pane_bg,
+            _ => return,
+        };
+        let n = std::str::from_utf8(params[0]).unwrap_or_default();
+        self.replies
+            .push(format!("\x1b]{n};rgb:{r:02x}{r:02x}/{g:02x}{g:02x}/{b:02x}{b:02x}\x1b\\").into_bytes());
+    }
 }
 
 pub type Parser = vt100::Parser<Callbacks>;
@@ -719,6 +732,17 @@ mod snapshot_tests {
         s.scroll_by(10_000);
         let got: Vec<String> = s.parser.screen().rows(0, 10).collect();
         assert_eq!(got[..3], ["0123456789", "abc", "old"]);
+    }
+
+    #[test]
+    fn answers_colour_queries() {
+        let mut p = parser(4, 10);
+        p.process(b"\x1b]11;?\x07\x1b]10;?\x1b\\\x1b]12;?\x07");
+        let bg = crate::theme::get().pane_bg;
+        let replies = std::mem::take(&mut p.callbacks_mut().replies);
+        assert_eq!(replies.len(), 2);
+        assert_eq!(replies[0], format!("\x1b]11;rgb:{0:02x}{0:02x}/{1:02x}{1:02x}/{2:02x}{2:02x}\x1b\\", bg.0, bg.1, bg.2).into_bytes());
+        assert!(replies[1].starts_with(b"\x1b]10;rgb:"));
     }
 
     #[test]

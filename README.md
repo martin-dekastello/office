@@ -49,6 +49,9 @@ The name comes from the Slovak word *salaš*, a shepherd's hut up in the mountai
   editor and the tab goes away. A Claude session that exits can still be brought back with
   `R`. Only a Claude that fails to start stays open, so you can read why.
 - **GitHub (via `gh`) + Jira Cloud + local issues**, behind one `Provider` trait.
+- **Light and dark.** With `theme = "auto"` (the default) salash asks the terminal for its
+  background colour at startup and matches it; set `"dark"` or `"light"` to choose. Programs in
+  tabs that ask for the background (Claude Code, nvim) get the same answer.
 - **Cross-platform**: macOS, Linux, Windows (ConPTY). It's a single binary with its own
   terminal emulation, so it doesn't need tmux.
 
@@ -73,6 +76,7 @@ vault = "~/Documents/Obsidian"
 notes_dir = "Issues"
 worktrees_dir = "~/worktrees"
 prefix = "ctrl-a"
+theme = "auto"                  # auto | dark | light
 
 [[github]]
 repo = "johan/transport-sim"
