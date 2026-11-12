@@ -17,6 +17,10 @@ The name comes from the Slovak word *salaš*, a shepherd's hut up in the mountai
 ```
 
 - **Sorted by issue.** Each issue has its own tabs: Claude sessions, shells, and a note editor.
+- **Scratch, for work outside any issue.** Press `` ` `` and a Scratch row appears at the top
+  of the sidebar, where `c`, `C` and `t` open Claude and shell tabs that belong to no issue, for
+  example to write up a new issue. They start in the default directory, with no worktree or note.
+  Scratch stays first in every view and sort while it has tabs, and hides again once it has none.
 - **Claude status on every tab and issue**, set by Claude Code hooks:
   `✳` working (animated) · `●` amber = needs you (permission/question) ·
   `●` green = finished while you weren't looking · `○` idle · `✕` exited · `–` suspended.
@@ -141,6 +145,7 @@ to the terminal.
 | `0` `1` `2` `3` / `h` | view To-do / Active / Done / Archive |
 | `s` | sort by created / name / moved / activity |
 | `c` `t` `e` | new Claude / shell / note-editor tab |
+| `` ` `` | go to Scratch, for tabs outside any issue |
 | `z` / `R` | suspend Claude tab / reopen closed Claude tab |
 | `C` | new Claude tab in a directory you type (`Tab` completes, empty = issue default) |
 | `p` | set the default directory for issues with no repo (`Tab` completes, empty = keep) |
@@ -155,6 +160,7 @@ to the terminal.
 | `s` / `Tab` | toggle focus between sidebar and terminal |
 | `1`–`9`, `h`/`l` | go to tab, previous/next tab |
 | `j` / `k` | next/previous issue |
+| `` ` `` | go to Scratch |
 | `c` `C` `p` `t` `e` `z` `R` `o` `d` `a` `u` `T` `n` `S` | same as in the sidebar |
 | `x`, `,` | close tab, rename tab |
 | `[` `]` | scroll the tab back/forward (the mouse wheel works too) |
@@ -199,6 +205,7 @@ to `$SALASH_ISSUE`:
 ```sh
 salash tab new --mode plan --name probe --cwd ~/code/other --prompt-file brief.md
 salash tab new --kind shell
+salash tab new --issue scratch     # a tab outside any issue
 ```
 
 `--mode` and `--prompt-file` apply only to the first launch. A suspended or restarted tab
