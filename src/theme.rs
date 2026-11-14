@@ -23,6 +23,8 @@ pub struct Theme {
     pub on_accent: Color,
     pub orange: Color,
     pub amber: Color,
+    /// Working Claude tab.
+    pub yellow: Color,
     pub green: Color,
     pub red: Color,
     pub accent: Color,
@@ -46,6 +48,7 @@ pub const DARK: Theme = Theme {
     on_accent: Color::Black,
     orange: Color::Rgb(217, 119, 87), // Claude orange
     amber: Color::Rgb(245, 180, 60),
+    yellow: Color::Rgb(230, 220, 80),
     green: Color::Rgb(120, 200, 120),
     red: Color::Rgb(220, 95, 95),
     accent: Color::Rgb(140, 170, 255),
@@ -68,6 +71,7 @@ pub const LIGHT: Theme = Theme {
     on_accent: Color::White,
     orange: Color::Rgb(196, 90, 55),
     amber: Color::Rgb(176, 108, 0),
+    yellow: Color::Rgb(140, 125, 0),
     green: Color::Rgb(30, 130, 50),
     red: Color::Rgb(190, 45, 45),
     accent: Color::Rgb(50, 90, 210),

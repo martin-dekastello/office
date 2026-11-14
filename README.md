@@ -5,12 +5,12 @@ Issues on the left, Claude Code tabs on the right, one Obsidian note per issue.
 The name comes from the Slovak word *salaš*, a shepherd's hut up in the mountain pastures.
 
 ```
- salash  ● 1                            │ ✳ 1:Refactor tile cache   ● 2:Fix loader   $ 3:shell
+ salash  ▲ 1                            │ ◐ 1:Refactor tile cache   ● 2:Fix loader   $ 3:shell
   To-do 5  Active 3  Done 1  Archive 0  │
                                         │  (live Claude Code session for the selected issue)
- ✳ TS-42                             3▤ │
+ ◐ TS-42                             3▤ │
    Přidat mapu dlaždic pro fotky        │
- ● PROJ-118                          1▤ │
+ ▲ PROJ-118                          1▤ │
    Fix OAuth login loop                 │
    LOCAL-3                              │
    Session naming request               │
@@ -22,7 +22,7 @@ The name comes from the Slovak word *salaš*, a shepherd's hut up in the mountai
   example to write up a new issue. They start in the default directory, with no worktree or note.
   Scratch stays first in every view and sort while it has tabs, and hides again once it has none.
 - **Claude status on every tab and issue**, set by Claude Code hooks:
-  `✳` working (animated) · `●` amber = needs you (permission/question) ·
+  `◐` yellow = working (animated) · `▲` amber = needs you (permission/question) ·
   `●` green = finished while you weren't looking · `○` idle · `✕` exited · `–` suspended.
   The status of the most urgent tab also shows on the issue in the sidebar.
   The terminal bell rings when a background tab needs you.
