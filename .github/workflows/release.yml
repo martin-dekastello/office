@@ -20,7 +20,7 @@ jobs:
       matrix:
         include:
           - target: aarch64-apple-darwin
-            os: macos-14
+            os: macos-latest
           - target: aarch64-unknown-linux-musl
             os: ubuntu-24.04-arm
           - target: x86_64-unknown-linux-musl
@@ -36,6 +36,7 @@ jobs:
       - uses: taiki-e/upload-rust-binary-action@v1
         with:
           bin: salash
+          build-tool: cargo
           target: ${{ matrix.target }}
           archive: salash-$tag-$target
           include: LICENSE,README.md
