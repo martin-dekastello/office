@@ -49,7 +49,8 @@ impl Tab {
         Tab { st, pane: None, status: ClaudeStatus::Exited, status_ts: 0, seen_ts: 0, esc_ts: None, exit_check: None, first_args: vec![] }
     }
 
-    /// Status as shown: "Done" turns into "Idle" once you've looked at the tab.
+    /// Status as shown: "Done" turns into "Idle" once the tab has been on view
+    /// for `seen_after_secs`.
     pub fn shown_status(&self) -> ClaudeStatus {
         if self.status == ClaudeStatus::Done && self.status_ts <= self.seen_ts {
             ClaudeStatus::Idle
@@ -159,6 +160,21 @@ fn activity(kind: TabKind, status: Option<ClaudeStatus>) -> u8 {
 
 fn scratch_shown(tabs: usize, selected: bool) -> bool {
     tabs > 0 || selected
+}
+
+/// Track the tab on view. True once the same tab has been on view for `after_ms`.
+fn dwell(on_view: &mut Option<(String, i64)>, tab: Option<&str>, now: i64, after_ms: i64) -> bool {
+    match (on_view.as_ref(), tab) {
+        (_, None) => {
+            *on_view = None;
+            false
+        }
+        (Some((id, since)), Some(t)) if id == t => now - since >= after_ms,
+        (_, Some(t)) => {
+            *on_view = Some((t.to_string(), now));
+            after_ms <= 0
+        }
+    }
 }
 
 /// Where a tab that needs the issue's checkout starts.
@@ -284,6 +300,9 @@ pub struct App {
     last_scan: Instant,
     last_status: Instant,
     last_spin: Instant,
+    /// The tab on view and since when (ms): it counts as seen after
+    /// `seen_after_secs`. One for everyone while all clients share one view.
+    on_view: Option<(String, i64)>,
 }
 
 fn now_ms() -> i64 {
@@ -351,6 +370,7 @@ impl App {
             last_scan: Instant::now(),
             last_status: Instant::now(),
             last_spin: Instant::now(),
+            on_view: None,
         };
         if let Some(n) = app.selected_note() {
             app.view = n.stage;
@@ -1166,12 +1186,18 @@ impl App {
             }
         }
 
-        // Mark the visible tab as seen.
+        // Mark the visible tab as seen once it has stayed on view long enough,
+        // so flicking past a finished tab doesn't count as reading it. After
+        // autoscroll_select, so a selection it changed restarts the timer now.
         let now = now_ms();
-        if let Some(id) = self.selected.clone() {
-            if let Some(rt) = self.rt.get_mut(&id) {
-                if let Some(t) = rt.tabs.get_mut(rt.active) {
-                    t.seen_ts = now;
+        let tab = self.active_tab().map(|t| t.st.id.clone());
+        let after = i64::try_from(self.cfg.seen_after_secs.saturating_mul(1000)).unwrap_or(i64::MAX);
+        if dwell(&mut self.on_view, tab.as_deref(), now, after) {
+            if let Some(id) = self.selected.clone() {
+                if let Some(rt) = self.rt.get_mut(&id) {
+                    if let Some(t) = rt.tabs.get_mut(rt.active) {
+                        t.seen_ts = now;
+                    }
                 }
             }
         }
@@ -1828,6 +1854,79 @@ mod tests {
         assert!(t.suspended());
         t.st.kind = TabKind::Shell;
         assert!(!t.suspended());
+    }
+
+    #[test]
+    fn a_done_tab_reads_as_idle_only_once_seen() {
+        let mut t = tab(ClaudeStatus::Done, 1000, None);
+        assert_eq!(t.shown_status(), ClaudeStatus::Done);
+        t.seen_ts = 999;
+        assert_eq!(t.shown_status(), ClaudeStatus::Done);
+        t.seen_ts = 1000;
+        assert_eq!(t.shown_status(), ClaudeStatus::Idle);
+        let mut w = tab(ClaudeStatus::Working, 1000, None);
+        w.seen_ts = 5000;
+        assert_eq!(w.shown_status(), ClaudeStatus::Working);
+    }
+
+    #[test]
+    fn a_tab_counts_as_seen_after_staying_on_view() {
+        let mut v = None;
+        assert!(!dwell(&mut v, Some("a"), 0, 5000));
+        assert!(!dwell(&mut v, Some("a"), 4999, 5000));
+        assert!(dwell(&mut v, Some("a"), 5000, 5000));
+        // Another tab, then back: the timer starts again.
+        assert!(!dwell(&mut v, Some("b"), 6000, 5000));
+        assert!(!dwell(&mut v, Some("a"), 7000, 5000));
+        assert!(!dwell(&mut v, Some("a"), 11999, 5000));
+        assert!(dwell(&mut v, Some("a"), 12000, 5000));
+        // Nothing on view resets it too.
+        assert!(!dwell(&mut v, None, 12500, 5000));
+        assert!(!dwell(&mut v, Some("a"), 13000, 5000));
+    }
+
+    #[test]
+    fn zero_delay_marks_seen_at_once() {
+        assert!(dwell(&mut None, Some("a"), 0, 0));
+    }
+
+    /// What `tick` does: mark the tab seen when `dwell` says so.
+    fn view(t: &mut Tab, on_view: &mut Option<(String, i64)>, now: i64) {
+        if dwell(on_view, Some(&t.st.id), now, 5000) {
+            t.seen_ts = now;
+        }
+    }
+
+    #[test]
+    fn leaving_before_the_delay_keeps_done_unread() {
+        let mut t = tab(ClaudeStatus::Done, 100, None);
+        let mut v = None;
+        view(&mut t, &mut v, 200);
+        view(&mut t, &mut v, 3000);
+        dwell(&mut v, Some("other"), 3100, 5000);
+        assert_eq!(t.shown_status(), ClaudeStatus::Done);
+
+        view(&mut t, &mut v, 4000);
+        view(&mut t, &mut v, 8999);
+        assert_eq!(t.shown_status(), ClaudeStatus::Done);
+        view(&mut t, &mut v, 9000);
+        assert_eq!(t.shown_status(), ClaudeStatus::Idle);
+    }
+
+    #[test]
+    fn a_suspended_done_tab_is_seen_only_after_the_delay() {
+        let mut t = tab(ClaudeStatus::Done, 100, None);
+        t.st.claude_session = Some("s".into());
+        assert!(t.pane.is_none() && t.suspended());
+        let mut v = None;
+        view(&mut t, &mut v, 200);
+        view(&mut t, &mut v, 5199);
+        dwell(&mut v, Some("other"), 5300, 5000);
+        assert_eq!(t.shown_status(), ClaudeStatus::Done);
+
+        view(&mut t, &mut v, 6000);
+        view(&mut t, &mut v, 11000);
+        assert_eq!(t.shown_status(), ClaudeStatus::Idle);
     }
 
     #[test]
