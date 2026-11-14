@@ -216,13 +216,14 @@ select text.
 ## How the Claude status works
 
 Each tab is started with `SALASH_TAB=<uuid>`. Claude tabs are launched as
-`claude --settings <data>/claude-hooks.json`. That file registers `salash hook` for
+`claude --settings <data>/claude-hooks.json --plugin-dir <data>/plugin`. The plugin holds
+salash's skills (see below). That settings file registers `salash hook` for
 `SessionStart`, `UserPromptSubmit`, `Pre/PostToolUse`, `PermissionRequest`,
 `Notification`, `Stop` and `SessionEnd`. The hook writes `<data>/status/<uuid>.json`
 and the UI polls it. The hook does nothing when `SALASH_TAB` isn't set, so it's safe to
-install globally. If you'd rather not use `--settings`, set `inject_hooks = false` and run
-`salash install-hooks`. That merges the hooks into `~/.claude/settings.json` and writes
-a backup first.
+install globally. If you'd rather not use `--settings` and `--plugin-dir`, set
+`inject_hooks = false` and run `salash install-hooks`. That merges the hooks into
+`~/.claude/settings.json` and writes a backup first.
 
 Every tab also gets `SALASH_ISSUE`, `SALASH_NOTE` (the note's path), `SALASH_BIN` (the
 salash executable) and `SALASH_DATA` (its folder's `.salash`, where `<data>` is). You can tell
@@ -246,10 +247,22 @@ for salash to answer and fails if salash isn't running. Inside a tab it goes to 
 salash. Elsewhere it goes to the salash of the nearest folder above with a `.salash`, or the
 one given with `--folder`.
 
-`salash install-skill` adds the `/new-salash-tab` skill to `~/.claude/skills` (or
-`$CLAUDE_CONFIG_DIR`). In a Claude tab, `/new-salash-tab plan <task>` writes a handoff brief
-from the conversation and opens a new Claude tab in the same issue, started in that mode
-with the brief as its first prompt. It's like `/new-claude-tmux`, but without tmux.
+salash's own skills come as a Claude Code plugin named `salash`, built into the binary. Every
+time it starts, salash writes it to `<data>/plugin`, so it always matches the salash you have,
+and its Claude tabs load it with `--plugin-dir`. There is nothing to install, and Claude
+sessions outside salash never see it. In a Claude tab, `/salash:new-salash-tab plan <task>`
+writes a handoff brief from the conversation and opens a new Claude tab in the same issue,
+started in that mode with the brief as its first prompt. It's like `/new-claude-tmux`, but
+without tmux.
+
+With `inject_hooks = false` there is no plugin. Run `salash install-skill` instead: it writes
+every salash skill to `~/.claude/skills` (or `$CLAUDE_CONFIG_DIR`), where they go by their plain
+names, such as `/new-salash-tab`, in every Claude session.
+
+If you ran `salash install-skill` before, you can delete `~/.claude/skills/new-salash-tab`:
+until you do, the old copy shows up as `/new-salash-tab` next to `/salash:new-salash-tab`, and
+it doesn't change when salash is upgraded. salash never deletes it, but when it finds one it
+says so at startup and in `server.log`.
 
 ## CLI
 
@@ -262,7 +275,7 @@ salash list
 salash install-hooks
 salash tab new [--issue ID] [--kind claude|shell|notes] [--cwd DIR] [--name NAME]
                [--mode MODE] [--prompt-file FILE] [--folder DIR]   # open a tab in a running salash
-salash install-skill   # add /new-salash-tab to ~/.claude/skills
+salash install-skill   # add salash's skills to ~/.claude/skills (for inject_hooks = false)
 ```
 
 ## Layout
@@ -281,6 +294,7 @@ src/
   vault.rs      Obsidian notes (todo/active/done/archive), slugs, frontmatter
   providers.rs  GitHub (gh), Jira REST v3
   status.rs     Claude Code hook handler and settings
+  plugin.rs     salash's skills as a Claude Code plugin, written to <data>/plugin
   api.rs        `salash tab new` requests to the running salash
   worktree.rs   per-issue git worktrees
   state.rs      persisted tabs, session IDs and saved screens

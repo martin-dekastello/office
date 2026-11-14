@@ -48,8 +48,8 @@ pub struct Config {
     pub shell_command: Vec<String>,
     /// Command used for the notes tab. Empty = $VISUAL / $EDITOR / vi / notepad.
     pub editor_command: Vec<String>,
-    /// Pass a generated `--settings` file to claude so status hooks work
-    /// without touching ~/.claude/settings.json.
+    /// Pass a generated `--settings` file (status hooks) and `--plugin-dir`
+    /// (salash's skills) to claude, so neither has to go into ~/.claude.
     pub inject_hooks: bool,
     /// Prefix key, tmux style: "ctrl-a", "ctrl-b", "ctrl-g", ...
     pub prefix: String,
@@ -126,7 +126,7 @@ prefix = "ctrl-a"
 # claude_command = ["claude"]
 # shell_command  = []          # default: $SHELL / %COMSPEC%
 # editor_command = ["nvim"]    # default: $VISUAL / $EDITOR
-# inject_hooks = true          # pass status hooks via `claude --settings`
+# inject_hooks = true          # status hooks via `claude --settings`, skills via `--plugin-dir`
 # local_prefix = "LOCAL"
 # local_repo = "/path/to/repo" # worktrees for local issues
 # bell = true

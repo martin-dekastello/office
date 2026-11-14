@@ -40,6 +40,7 @@ on purpose: two servers for one folder would fight over its state and its tabs. 
   status/            Claude hook status, one file per tab
   requests/          `salash tab new` requests
   claude-hooks.json  the --settings file Claude tabs get
+  plugin/            the --plugin-dir Claude tabs get: salash's skills, rewritten at every start
 ```
 
 The folder's `config.toml` is merged over the global config. Tables merge key by key, and
@@ -141,3 +142,10 @@ from before versions sends tag 1, which a newer server rejects, closing the conn
   cross the socket, and std `File::try_lock`. The [`daemonize`](https://github.com/knsd/daemonize)
   crate forks, which is why it isn't used.
 - The folder that ignores itself is borrowed from pytest's `.pytest_cache/.gitignore`.
+- salash's skills are a [Claude Code plugin](https://code.claude.com/docs/en/plugins/manifest-reference.md)
+  embedded with [`include_dir`](https://github.com/Michael-F-Bryan/include_dir), written out at
+  startup and passed per session with `--plugin-dir`, as `claude-hooks.json` is with `--settings`.
+  Plugins installed into a global folder, as tmux's [TPM](https://github.com/tmux-plugins/tpm)
+  does with `~/.tmux/plugins`, are what this avoids: such a copy shows up everywhere and stays
+  behind when the program is upgraded. Example plugins:
+  [anthropics/claude-code/plugins](https://github.com/anthropics/claude-code/tree/main/plugins).

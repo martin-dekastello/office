@@ -5,8 +5,8 @@ description: Open a new Claude Code tab in the same salash issue, seeded with a 
 
 # Spin off a new Claude tab in salash
 
-`/new-salash-tab [mode] <task…>` opens a new Claude tab in the salash issue this session
-belongs to. The tab runs in the given permission mode, and its first prompt is a handoff
+`/salash:new-salash-tab [mode] <task…>` (or `/new-salash-tab` when installed with
+`salash install-skill`) opens a new Claude tab in the salash issue this session belongs to. The tab runs in the given permission mode, and its first prompt is a handoff
 brief: the relevant context from this conversation plus the task. You are the *calling*
 session. The new one starts with no context, so the brief is everything it knows. The tab
 opens in the background, so the user stays where they are.

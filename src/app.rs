@@ -2,6 +2,7 @@ use crate::api::{self, Reply, Request};
 use crate::complete::{self, Completion};
 use crate::config::Config;
 use crate::keys;
+use crate::plugin;
 use crate::proto::ServerMsg;
 use crate::providers::{self, SyncReport};
 use crate::state::{self, IssueState, SortMode, State, TabKind, TabState};
@@ -268,6 +269,8 @@ pub struct App {
     /// For the client whose input this is: what to copy or open on its side.
     pub outbox: Vec<ServerMsg>,
     hooks_settings: Option<PathBuf>,
+    /// salash's plugin (its skills), passed as `claude --plugin-dir`.
+    plugin_dir: Option<PathBuf>,
     bell_pending: bool,
     // Hit areas from the last draw.
     pub term_rect: Rect,
@@ -300,6 +303,47 @@ fn home() -> PathBuf {
     dirs::home_dir().unwrap_or_else(|| PathBuf::from("."))
 }
 
+/// Claude's argv: the configured command, salash's hooks settings and plugin
+/// when given, then `--resume <session>` or, on a first launch, `first_args`.
+fn claude_argv(
+    cmd: &[String],
+    settings: Option<&Path>,
+    plugin: Option<&Path>,
+    session: Option<&str>,
+    first_args: Vec<String>,
+) -> Vec<String> {
+    let mut v = cmd.to_vec();
+    if let Some(s) = settings {
+        v.push("--settings".into());
+        v.push(s.to_string_lossy().into_owned());
+    }
+    if let Some(p) = plugin {
+        v.push("--plugin-dir".into());
+        v.push(p.to_string_lossy().into_owned());
+    }
+    match session {
+        Some(sid) => {
+            v.push("--resume".into());
+            v.push(sid.into());
+        }
+        None => v.extend(first_args),
+    }
+    v
+}
+
+/// The startup hint when `salash install-skill` left copies of the plugin's
+/// skills in `<claude_dir>/skills`. None when there are none.
+fn old_skills_hint(claude_dir: &Path) -> Option<String> {
+    let old = plugin::global_copies(claude_dir);
+    if old.is_empty() {
+        return None;
+    }
+    let paths: Vec<String> =
+        old.iter().map(|n| crate::config::shorten(&claude_dir.join("skills").join(n))).collect();
+    let now: Vec<String> = old.iter().map(|n| format!("/{}:{n}", plugin::NAME)).collect();
+    Some(format!("{} can go: salash's plugin gives its tabs {}", paths.join(", "), now.join(", ")))
+}
+
 /// The saved default directory if it still exists, otherwise salash's folder.
 fn usable_default(saved: Option<&Path>, folder: &Path) -> PathBuf {
     saved.filter(|p| p.is_dir()).unwrap_or(folder).to_path_buf()
@@ -311,6 +355,11 @@ impl App {
         let notes = vault.scan();
         let state = State::load();
         let hooks_settings = if cfg.inject_hooks { status::write_settings_file().ok() } else { None };
+        let plugin_dir = if cfg.inject_hooks {
+            plugin::write().map_err(|e| eprintln!("writing salash's Claude plugin: {e:#}")).ok()
+        } else {
+            None
+        };
         let prefix = keys::parse_prefix(&cfg.prefix);
         let mut app = App {
             selected: state.selected.clone().filter(|id| {
@@ -338,6 +387,7 @@ impl App {
             detach: false,
             outbox: vec![],
             hooks_settings,
+            plugin_dir,
             bell_pending: false,
             term_rect: Rect::default(),
             sidebar_rect: Rect::default(),
@@ -365,6 +415,10 @@ impl App {
         }
         if first_run {
             app.flash(format!("Created {} — set your vault and sources there", crate::config::config_path().display()));
+        } else if let Some(hint) = app.plugin_dir.as_ref().and_then(|_| old_skills_hint(&status::claude_dir())) {
+            // Also in server.log, as a sync finishing soon after start replaces the flash.
+            eprintln!("{hint}");
+            app.flash(hint);
         } else if app.notes.is_empty() {
             app.flash("No issues yet: n = new local issue, S = sync GitHub/Jira".into());
         }
@@ -758,20 +812,13 @@ impl App {
         let st = tab.st.clone();
         let first_args = std::mem::take(&mut tab.first_args);
         let argv: Vec<String> = match st.kind {
-            TabKind::Claude => {
-                let mut v = self.cfg.claude_command.clone();
-                if let Some(s) = &self.hooks_settings {
-                    v.push("--settings".into());
-                    v.push(s.to_string_lossy().into_owned());
-                }
-                if let Some(sid) = &st.claude_session {
-                    v.push("--resume".into());
-                    v.push(sid.clone());
-                } else {
-                    v.extend(first_args);
-                }
-                v
-            }
+            TabKind::Claude => claude_argv(
+                &self.cfg.claude_command,
+                self.hooks_settings.as_deref(),
+                self.plugin_dir.as_deref(),
+                st.claude_session.as_deref(),
+                first_args,
+            ),
             TabKind::Shell => self.cfg.shell(),
             TabKind::Notes => {
                 let Some(note) = note else { return };
@@ -1790,6 +1837,42 @@ mod tests {
             cwd: None,
         };
         Tab { status, status_ts, esc_ts, ..Tab::new(st) }
+    }
+
+    fn strs(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn claude_gets_hooks_and_plugin_before_its_own_args() {
+        let (s, p) = (Path::new("/d/claude-hooks.json"), Path::new("/d/plugin"));
+        let first = claude_argv(&strs(&["claude"]), Some(s), Some(p), None, strs(&["--permission-mode", "plan", "brief"]));
+        assert_eq!(
+            first,
+            strs(&["claude", "--settings", "/d/claude-hooks.json", "--plugin-dir", "/d/plugin", "--permission-mode", "plan", "brief"])
+        );
+        let resumed = claude_argv(&strs(&["claude"]), Some(s), Some(p), Some("sid"), strs(&["ignored"]));
+        assert_eq!(resumed, strs(&["claude", "--settings", "/d/claude-hooks.json", "--plugin-dir", "/d/plugin", "--resume", "sid"]));
+    }
+
+    #[test]
+    fn without_injection_claude_gets_neither() {
+        let v = claude_argv(&strs(&["npx", "claude"]), None, None, Some("sid"), vec![]);
+        assert_eq!(v, strs(&["npx", "claude", "--resume", "sid"]));
+    }
+
+    #[test]
+    fn old_global_skill_gets_a_hint_and_stays() {
+        let dir = std::env::temp_dir().join(format!("salash-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        assert_eq!(old_skills_hint(&dir), None);
+        let old = dir.join("skills/new-salash-tab");
+        std::fs::create_dir_all(&old).unwrap();
+        let hint = old_skills_hint(&dir).unwrap();
+        assert!(hint.contains("new-salash-tab can go"), "{hint}");
+        assert!(hint.contains("/salash:new-salash-tab"), "{hint}");
+        assert!(old.is_dir());
+        std::fs::remove_dir_all(dir).ok();
     }
 
     #[test]

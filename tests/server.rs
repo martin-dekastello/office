@@ -38,6 +38,7 @@ impl Env {
         // Never the real config or the real global state.
         c.env("SALASH_CONFIG", self.root.join("config.toml"))
             .env("SALASH_DATA", self.root.join("global"))
+            .env("CLAUDE_CONFIG_DIR", self.root.join("claude"))
             .env_remove("SALASH_TAB")
             .current_dir(&self.root);
         c
@@ -141,6 +142,12 @@ fn one_server_per_folder_with_attach_detach_and_quit() {
     hello(&mut a, 100, 30);
     let (_, _) = until(&mut a, 11);
 
+    // Claude tabs get salash's skills from the folder's own plugin dir.
+    let plugin = env.folder.join(".salash/plugin");
+    let manifest = std::fs::read_to_string(plugin.join(".claude-plugin/plugin.json")).unwrap();
+    assert!(manifest.contains("\"name\": \"salash\""), "{manifest}");
+    assert!(plugin.join("skills/new-salash-tab/SKILL.md").is_file());
+
     // The folder is taken: starting again fails and says how to attach.
     let again = env.run(&[env.folder.to_str().unwrap()]);
     assert!(!again.status.success());
@@ -228,6 +235,16 @@ fn global_state_moves_into_the_first_folder() {
     assert!(env.folder.join(".salash/snapshots/t1.ansi").exists());
     assert!(!global.join("state.json").exists());
     assert_eq!(read_trim(&global.join("migrated")), env.folder.display().to_string());
+}
+
+#[test]
+fn install_skill_writes_into_the_claude_config_dir() {
+    let env = Env::new();
+    let o = env.run(&["install-skill"]);
+    assert!(o.status.success(), "{}", text(&o));
+    let skill = env.root.join("claude/skills/new-salash-tab/SKILL.md");
+    assert!(std::fs::read_to_string(&skill).unwrap().contains("name: new-salash-tab"));
+    assert!(text(&o).contains(&skill.display().to_string()), "{}", text(&o));
 }
 
 fn read_trim(p: &Path) -> String {
