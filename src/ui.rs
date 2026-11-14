@@ -14,7 +14,7 @@ use tui_term::widget::{Cursor, PseudoTerminal};
 
 const SIDEBAR_W: u16 = 34;
 const MAX_MATCHES: usize = 8;
-const SPIN: [&str; 6] = ["·", "✢", "✳", "✶", "✻", "✽"];
+const SPIN: [&str; 4] = ["◐", "◓", "◑", "◒"];
 
 fn colors() -> &'static Theme {
     theme::get()
@@ -22,8 +22,8 @@ fn colors() -> &'static Theme {
 
 pub fn status_glyph(s: ClaudeStatus, spin: usize) -> (&'static str, Style) {
     match s {
-        ClaudeStatus::Working => (SPIN[spin % SPIN.len()], Style::new().fg(colors().orange).add_modifier(Modifier::BOLD)),
-        ClaudeStatus::Attention => ("●", Style::new().fg(colors().amber).add_modifier(Modifier::BOLD)),
+        ClaudeStatus::Working => (SPIN[spin % SPIN.len()], Style::new().fg(colors().yellow).add_modifier(Modifier::BOLD)),
+        ClaudeStatus::Attention => ("▲", Style::new().fg(colors().amber).add_modifier(Modifier::BOLD)),
         ClaudeStatus::Done => ("●", Style::new().fg(colors().green)),
         ClaudeStatus::Idle => ("○", Style::new().fg(colors().fg_dim)),
         ClaudeStatus::Starting => ("◌", Style::new().fg(colors().fg_dim)),
@@ -118,10 +118,10 @@ fn draw_sidebar(app: &mut App, f: &mut Frame, area: Rect) {
         .count();
     let mut h = vec![Span::styled(" salash", Style::new().fg(colors().fg).add_modifier(Modifier::BOLD))];
     if app.syncing {
-        h.push(Span::styled(format!("  {} sync", SPIN[app.spinner % 6]), Style::new().fg(colors().fg_dim)));
+        h.push(Span::styled(format!("  {} sync", SPIN[app.spinner % SPIN.len()]), Style::new().fg(colors().fg_dim)));
     }
     if attention > 0 {
-        h.push(Span::styled(format!("  ● {attention}"), Style::new().fg(colors().amber).add_modifier(Modifier::BOLD)));
+        h.push(Span::styled(format!("  ▲ {attention}"), Style::new().fg(colors().amber).add_modifier(Modifier::BOLD)));
     }
     let head_used: usize = h.iter().map(Span::width).sum();
     f.render_widget(Paragraph::new(Line::from(h)), head);
@@ -507,7 +507,7 @@ fn draw_help(app: &App, f: &mut Frame, area: Rect) {
         ("D".into(), "detach: salash keeps running, `salash --attach` returns"),
         ("q".into(), "quit salash for everyone attached"),
         ("".into(), ""),
-        ("Status".into(), "✳ working  ● needs you  ● done  ○ idle  ✕ exited"),
+        ("Status".into(), "◐ working  ▲ needs you  ● done  ○ idle  ✕ exited"),
         ("".into(), "– suspended (⏎ resumes, scrolling still works)"),
     ];
     let lines: Vec<Line> = rows
