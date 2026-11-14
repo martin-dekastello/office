@@ -1,0 +1,43 @@
+name: release
+on:
+  push:
+    tags: ['v*']
+permissions:
+  contents: write
+jobs:
+  create-release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: taiki-e/create-gh-release-action@v1
+        with:
+          draft: true
+          token: ${{ secrets.GITHUB_TOKEN }}
+  upload:
+    needs: create-release
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            os: macos-14
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-24.04-arm
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+      - uses: taiki-e/upload-rust-binary-action@v1
+        with:
+          bin: salash
+          target: ${{ matrix.target }}
+          archive: salash-$tag-$target
+          include: LICENSE,README.md
+          checksum: sha256
+          token: ${{ secrets.GITHUB_TOKEN }}

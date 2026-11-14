@@ -62,8 +62,25 @@ The name comes from the Slovak word *salaš*, a shepherd's hut up in the mountai
 
 ## Install
 
+Download the binary for your platform from
+[Releases](https://github.com/martin-dekastello/office/releases): macOS (Apple silicon),
+Linux arm64 or Linux x86_64. The Linux builds are static (musl), so they run on any distro.
+
+```sh
+tar xzf salash-v0.0.1-<target>.tar.gz
+mv salash ~/.local/bin/          # or anywhere on PATH
+xattr -d com.apple.quarantine ~/.local/bin/salash   # macOS only: the binary isn't signed
+```
+
+Or build from source:
+
 ```sh
 cargo install --path .
+```
+
+Then:
+
+```sh
 salash [folder]      # start salash in a folder (default: here); first run writes the config
 salash paths         # where config, data, notes and worktrees live
 ```
@@ -291,3 +308,7 @@ src/
   prompt the tab stays amber until that tool finishes. A new worktree's trust dialog shows as
   starting (`◌`), not as needing you.
 - Done/archived issues keep their worktree. Remove it with `git worktree remove` when you're done.
+
+## License
+
+GPL-3.0-or-later. See [LICENSE](LICENSE).
