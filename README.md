@@ -217,11 +217,11 @@ select text.
 
 Each tab is started with `SALASH_TAB=<uuid>`. Claude tabs are launched as
 `claude --settings <data>/claude-hooks.json --plugin-dir <data>/plugin`. The plugin holds
-salash's skills (see below). That settings file registers `salash hook` for
+salash's skills (see below) and is always passed. The settings file registers `salash hook` for
 `SessionStart`, `UserPromptSubmit`, `Pre/PostToolUse`, `PermissionRequest`,
 `Notification`, `Stop` and `SessionEnd`. The hook writes `<data>/status/<uuid>.json`
 and the UI polls it. The hook does nothing when `SALASH_TAB` isn't set, so it's safe to
-install globally. If you'd rather not use `--settings` and `--plugin-dir`, set
+install globally. If you'd rather not use `--settings`, set
 `inject_hooks = false` and run `salash install-hooks`. That merges the hooks into
 `~/.claude/settings.json` and writes a backup first.
 
@@ -253,16 +253,11 @@ and its Claude tabs load it with `--plugin-dir`. There is nothing to install, an
 sessions outside salash never see it. In a Claude tab, `/salash:new-salash-tab plan <task>`
 writes a handoff brief from the conversation and opens a new Claude tab in the same issue,
 started in that mode with the brief as its first prompt. It's like `/new-claude-tmux`, but
-without tmux.
+without tmux. Loading a plugin with `--plugin-dir` needs Claude Code 2.1.74 or later.
 
-With `inject_hooks = false` there is no plugin. Run `salash install-skill` instead: it writes
-every salash skill to `~/.claude/skills` (or `$CLAUDE_CONFIG_DIR`), where they go by their plain
-names, such as `/new-salash-tab`, in every Claude session.
-
-If you ran `salash install-skill` before, you can delete `~/.claude/skills/new-salash-tab`:
-until you do, the old copy shows up as `/new-salash-tab` next to `/salash:new-salash-tab`, and
-it doesn't change when salash is upgraded. salash never deletes it, but when it finds one it
-says so at startup and in `server.log`.
+Older salash versions had `salash install-skill`. If you ran it, you can delete
+`~/.claude/skills/new-salash-tab`: until you do, the old copy shows up as `/new-salash-tab`
+next to `/salash:new-salash-tab`, and it doesn't change when salash is upgraded.
 
 ## CLI
 
@@ -275,7 +270,6 @@ salash list
 salash install-hooks
 salash tab new [--issue ID] [--kind claude|shell|notes] [--cwd DIR] [--name NAME]
                [--mode MODE] [--prompt-file FILE] [--folder DIR]   # open a tab in a running salash
-salash install-skill   # add salash's skills to ~/.claude/skills (for inject_hooks = false)
 ```
 
 ## Layout

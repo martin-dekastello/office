@@ -65,9 +65,6 @@ enum Cmd {
         #[command(subcommand)]
         cmd: TabCmd,
     },
-    /// Install salash's Claude Code skills into ~/.claude/skills (only needed if
-    /// inject_hooks = false; salash's Claude tabs otherwise load them as a plugin).
-    InstallSkill,
 }
 
 #[derive(Subcommand)]
@@ -213,12 +210,6 @@ fn main() -> Result<()> {
                 bail!("{}", reply.error.unwrap_or_else(|| "failed".into()));
             }
             println!("tab:{} issue:{issue}", reply.tab.unwrap_or_default());
-            Ok(())
-        }
-        Some(Cmd::InstallSkill) => {
-            for p in plugin::install_skills(&status::claude_dir())? {
-                println!("Skill written to {}", p.display());
-            }
             Ok(())
         }
         None => {

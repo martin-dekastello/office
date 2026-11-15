@@ -238,13 +238,34 @@ fn global_state_moves_into_the_first_folder() {
 }
 
 #[test]
-fn install_skill_writes_into_the_claude_config_dir() {
+fn without_injected_hooks_claude_still_gets_the_plugin() {
     let env = Env::new();
-    let o = env.run(&["install-skill"]);
+    // A fake claude that records its argv.
+    let argv = env.root.join("argv");
+    let script = format!("printf '%s\\n' \"$@\" > {argv:?}; sleep 30");
+    let mut cfg = std::fs::read_to_string(env.root.join("config.toml")).unwrap();
+    cfg += &format!("inject_hooks = false\nclaude_command = [\"sh\", \"-c\", {script:?}, \"claude\"]\n");
+    std::fs::write(env.root.join("config.toml"), cfg).unwrap();
+    let mut server = env.server();
+    let mut a = env.connect();
+    let _ = until(&mut a, 10);
+    hello(&mut a, 100, 30);
+    let _ = until(&mut a, 11);
+
+    let o = env.run(&["tab", "new", "--issue", "scratch", "--folder", env.folder.to_str().unwrap()]);
     assert!(o.status.success(), "{}", text(&o));
-    let skill = env.root.join("claude/skills/new-salash-tab/SKILL.md");
-    assert!(std::fs::read_to_string(&skill).unwrap().contains("name: new-salash-tab"));
-    assert!(text(&o).contains(&skill.display().to_string()), "{}", text(&o));
+    let start = Instant::now();
+    while !argv.exists() && start.elapsed() < Duration::from_secs(10) {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let args = std::fs::read_to_string(&argv).unwrap_or_default();
+    let plugin = env.folder.join(".salash/plugin");
+    assert!(args.contains(&format!("--plugin-dir\n{}\n", plugin.display())), "{args}");
+    assert!(!args.contains("--settings"), "{args}");
+    assert!(plugin.join("skills/new-salash-tab/SKILL.md").is_file());
+
+    server.kill().ok();
+    server.wait().ok();
 }
 
 fn read_trim(p: &Path) -> String {

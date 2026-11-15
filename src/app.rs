@@ -331,19 +331,6 @@ fn claude_argv(
     v
 }
 
-/// The startup hint when `salash install-skill` left copies of the plugin's
-/// skills in `<claude_dir>/skills`. None when there are none.
-fn old_skills_hint(claude_dir: &Path) -> Option<String> {
-    let old = plugin::global_copies(claude_dir);
-    if old.is_empty() {
-        return None;
-    }
-    let paths: Vec<String> =
-        old.iter().map(|n| crate::config::shorten(&claude_dir.join("skills").join(n))).collect();
-    let now: Vec<String> = old.iter().map(|n| format!("/{}:{n}", plugin::NAME)).collect();
-    Some(format!("{} can go: salash's plugin gives its tabs {}", paths.join(", "), now.join(", ")))
-}
-
 /// The saved default directory if it still exists, otherwise salash's folder.
 fn usable_default(saved: Option<&Path>, folder: &Path) -> PathBuf {
     saved.filter(|p| p.is_dir()).unwrap_or(folder).to_path_buf()
@@ -355,10 +342,14 @@ impl App {
         let notes = vault.scan();
         let state = State::load();
         let hooks_settings = if cfg.inject_hooks { status::write_settings_file().ok() } else { None };
-        let plugin_dir = if cfg.inject_hooks {
-            plugin::write().map_err(|e| eprintln!("writing salash's Claude plugin: {e:#}")).ok()
-        } else {
-            None
+        // Not tied to inject_hooks: --plugin-dir leaves ~/.claude alone.
+        let plugin_dir = crate::config::data_dir().join("plugin");
+        let plugin_dir = match plugin::write_to(&plugin_dir) {
+            Ok(()) => Some(plugin_dir),
+            Err(e) => {
+                eprintln!("writing salash's Claude plugin: {e:#}");
+                None
+            }
         };
         let prefix = keys::parse_prefix(&cfg.prefix);
         let mut app = App {
@@ -415,10 +406,6 @@ impl App {
         }
         if first_run {
             app.flash(format!("Created {} — set your vault and sources there", crate::config::config_path().display()));
-        } else if let Some(hint) = app.plugin_dir.as_ref().and_then(|_| old_skills_hint(&status::claude_dir())) {
-            // Also in server.log, as a sync finishing soon after start replaces the flash.
-            eprintln!("{hint}");
-            app.flash(hint);
         } else if app.notes.is_empty() {
             app.flash("No issues yet: n = new local issue, S = sync GitHub/Jira".into());
         }
@@ -1859,20 +1846,6 @@ mod tests {
     fn without_injection_claude_gets_neither() {
         let v = claude_argv(&strs(&["npx", "claude"]), None, None, Some("sid"), vec![]);
         assert_eq!(v, strs(&["npx", "claude", "--resume", "sid"]));
-    }
-
-    #[test]
-    fn old_global_skill_gets_a_hint_and_stays() {
-        let dir = std::env::temp_dir().join(format!("salash-test-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
-        assert_eq!(old_skills_hint(&dir), None);
-        let old = dir.join("skills/new-salash-tab");
-        std::fs::create_dir_all(&old).unwrap();
-        let hint = old_skills_hint(&dir).unwrap();
-        assert!(hint.contains("new-salash-tab can go"), "{hint}");
-        assert!(hint.contains("/salash:new-salash-tab"), "{hint}");
-        assert!(old.is_dir());
-        std::fs::remove_dir_all(dir).ok();
     }
 
     #[test]
