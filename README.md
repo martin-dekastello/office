@@ -89,8 +89,8 @@ Each folder's salash keeps its tabs, sessions and socket in `<folder>/.salash`, 
 itself in git. The first salash you start takes over the tabs and sessions saved by older
 versions of salash.
 
-Requirements: `claude` on PATH, `git` for worktrees, `gh` (logged in) for GitHub sources,
-`$JIRA_API_TOKEN` for Jira.
+Requirements: `claude` on PATH, `git` for worktrees, `gh` for GitHub sources (with a token
+from salash, see [Tokens](#tokens), or its own login), a Jira API token for Jira.
 
 ## Config
 
@@ -98,8 +98,9 @@ Requirements: `claude` on PATH, `git` for worktrees, `gh` (logged in) for GitHub
 on macOS, `%APPDATA%\salash\config.toml` on Windows. Override with `$SALASH_CONFIG`.
 A folder's `.salash/config.toml` overrides some of it for that folder's salash: `vault`,
 `notes_dir`, `prefix`, `local_prefix`, `bell`, `mouse` and `[[github]]` sources (without
-`path`). For example, give a team folder its own vault and sources. Commands, repo paths and
-Jira only come from your own config, because a repo you clone can ship a `.salash/config.toml`.
+`path` and `token_env`). For example, give a team folder its own vault and sources. Commands,
+repo paths, `token_env` and Jira only come from your own config, because a repo you clone can
+ship a `.salash/config.toml`.
 salash ignores the rest and says so when it starts.
 
 ```toml
@@ -114,6 +115,7 @@ repo = "johan/transport-sim"
 path = "~/code/transport-sim"   # local clone used for worktrees
 id_prefix = "TS"                # -> TS-42-<slug>.md
 search = "assignee:@me"
+token_env = "WORK_GH_TOKEN"     # optional: env var holding the token (never the token itself)
 
 [[jira]]
 url = "https://yourcompany.atlassian.net"
@@ -122,6 +124,56 @@ token_env = "JIRA_API_TOKEN"
 jql = "assignee = currentUser() AND statusCategory != Done ORDER BY updated DESC"
 path = "~/code/backend"
 ```
+
+### Tokens
+
+Token values never go into `config.toml`. For each source salash looks, in this order, at:
+
+1. the env var named by the source's `token_env`, if set;
+2. the OS keychain: service `salash`, account `github:owner/repo` or
+   `jira:https://yourcompany.atlassian.net` (macOS Keychain; on Linux the Secret Service,
+   i.e. GNOME Keyring or KWallet; Windows Credential Manager);
+3. `$GH_TOKEN` / `$JIRA_API_TOKEN`;
+4. GitHub only: `gh`'s own login (`gh auth login`), as before.
+
+A GitHub token goes to `gh` as `GH_TOKEN` in that one command's environment, never on its
+command line. Tabs don't get it.
+
+```
+salash token set github:owner/repo      # prompts without echo, or reads stdin
+salash token set jira:https://yourcompany.atlassian.net < token.txt
+salash token status                     # where each source's token comes from (never the token)
+salash token get github:owner/repo      # print it, e.g. for GH_TOKEN=$(...)
+salash token delete github:owner/repo
+```
+
+The keychain is read on every sync, so `salash token set` applies at the next `S` without a
+restart. Env vars are different: a running salash keeps the environment it started with.
+A keychain that can't be read (no Secret Service, a locked keychain over SSH, no answer within
+10 seconds) is skipped quietly and the env vars still work; `salash token status` says why.
+What `salash token get` prints stays in your terminal's scrollback (and in a salash tab's saved
+screen), as anything printed in a terminal does.
+
+**Give tokens the least they need.**
+
+- **GitHub:** a fine-grained token with **Issues: read** and **Metadata: read**, for only the
+  repositories you sync ("Only select repositories"). [This link](https://github.com/settings/personal-access-tokens/new?name=salash&description=salash+issue+sync&issues=read&metadata=read)
+  opens the form with those filled in; add `&target_name=<org>` for an organization's repos (the
+  error salash shows when `gh` fails has that link for the source's owner). Organizations may
+  have to allow or approve fine-grained tokens. A classic token
+  ([link](https://github.com/settings/tokens/new?description=salash&scopes=repo)) needs the `repo`
+  scope, which can read and write all your repositories.
+- **Jira:** at <https://id.atlassian.com/manage-profile/security/api-tokens> choose **Create API
+  token with scopes**, name it, pick an expiry (1–365 days), pick the **Jira** app and only the
+  **`read:jira-work`** scope, then copy the token. Atlassian has no link that fills this in. A
+  scoped token has to go through `api.atlassian.com/ex/jira/<cloudId>`: when the site refuses the
+  token, salash reads the site's cloudId from `<site>/_edge/tenant_info` and retries there.
+  Classic tokens without scopes keep working against the site.
+
+On macOS, a salash binary that changed (an upgrade or a rebuild) may get asked "salash wants to
+use your confidential information stored in … in your keychain"; choose Always Allow. On Linux
+the Secret Service must be running when salash starts; a keyring daemon started later is only
+seen after restarting salash.
 
 ### Your own worktree script
 
@@ -258,6 +310,8 @@ salash [folder]        # start the folder's salash in the background and attach
 salash --attach [folder]  # attach to the folder's running salash
 salash new <title>     # create a local issue note
 salash sync            # pull GitHub/Jira issues and create missing notes in todo/
+salash token set|get|delete <source>   # keep a source's token in the OS keychain
+salash token status    # where each source's token comes from
 salash list
 salash install-hooks
 salash tab new [--issue ID] [--kind claude|shell|notes] [--cwd DIR] [--name NAME]
@@ -285,6 +339,7 @@ src/
   worktree.rs   per-issue git worktrees
   state.rs      persisted tabs, session IDs and saved screens
   transcript.rs conversation text from Claude's transcript, for saved screens
+  token.rs      GitHub/Jira tokens from env vars and the OS keychain, `salash token`
 ```
 
 ## Known limits / next steps

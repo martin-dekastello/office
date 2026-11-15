@@ -41,9 +41,9 @@ window:
 
   The socket's mode is set when the server starts, so restart salash after changing this.
 - **Everyone attached acts as the user who started the server.** Claude, shells and worktree
-  scripts all run as that user, with that user's credentials (`gh` login, `$JIRA_API_TOKEN`,
-  Claude account, ssh agent). Being able to attach is the same as being able to run commands
-  as that user. Grant it accordingly. tmux works the same way, which is why it added
+  scripts all run as that user, with that user's credentials (`gh` login, tokens from env vars
+  and the keychain, Claude account, ssh agent). Being able to attach is the same as being able
+  to run commands as that user. Grant it accordingly. tmux works the same way, which is why it added
   `server-access`.
 - The server and its tabs keep the environment of the `salash` that started them: `PATH`,
   `SSH_AUTH_SOCK`, tokens. Attaching later doesn't change it, much as tmux behaves without

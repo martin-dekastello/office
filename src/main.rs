@@ -14,6 +14,7 @@ mod state;
 mod status;
 mod term;
 mod theme;
+mod token;
 mod transcript;
 mod ui;
 mod vault;
@@ -59,6 +60,11 @@ enum Cmd {
     List,
     /// Print config, data and notes paths.
     Paths,
+    /// Keep GitHub/Jira tokens in the OS keychain and see where each source's comes from.
+    Token {
+        #[command(subcommand)]
+        cmd: token::TokenCmd,
+    },
     /// Work with tabs of the running salash.
     Tab {
         #[command(subcommand)]
@@ -186,6 +192,7 @@ fn main() -> Result<()> {
             println!("worktrees {}", cfg.worktrees_dir.display());
             Ok(())
         }
+        Some(Cmd::Token { cmd }) => token::run(cmd, &load_config()?),
         Some(Cmd::Tab { cmd: TabCmd::New { issue, kind, cwd, name, mode, prompt_file, folder } }) => {
             match folder {
                 Some(f) => config::set_data_dir(Instance::new(Some(&f))?.dir),

@@ -14,6 +14,9 @@ pub struct GithubSource {
     pub id_prefix: Option<String>,
     /// `gh issue list --search` query. Default: "assignee:@me".
     pub search: Option<String>,
+    /// Environment variable holding a GitHub token, checked before the
+    /// keychain and $GH_TOKEN. Without any token, `gh` uses its own login.
+    pub token_env: Option<String>,
 }
 
 /// A Jira Cloud site to pull issues from (REST API v3).
@@ -22,7 +25,8 @@ pub struct JiraSource {
     /// e.g. "https://yourcompany.atlassian.net"
     pub url: String,
     pub email: String,
-    /// Environment variable that holds the API token. Default: JIRA_API_TOKEN.
+    /// Environment variable holding the API token, checked before the
+    /// keychain and $JIRA_API_TOKEN.
     pub token_env: Option<String>,
     /// Default: "assignee = currentUser() AND statusCategory != Done ORDER BY updated DESC"
     pub jql: Option<String>,
@@ -133,16 +137,28 @@ prefix = "ctrl-a"
 # mouse = true
 # theme = "auto"              # auto (follow the terminal) | dark | light
 
+# Tokens never go in this file. For each source salash looks in token_env (if set),
+# then the keychain (`salash token set github:owner/repo` or `salash token set
+# jira:https://yourcompany.atlassian.net`), then $GH_TOKEN / $JIRA_API_TOKEN.
+# GitHub falls back to `gh`'s own login. `salash token status` shows what is used.
+#
+# Give tokens the least they need:
+# - GitHub: a fine-grained token for only the repos you sync, with Issues: read and
+#   Metadata: read: https://github.com/settings/personal-access-tokens/new?name=salash&issues=read&metadata=read
+# - Jira: "Create API token with scopes", app Jira, scope read:jira-work:
+#   https://id.atlassian.com/manage-profile/security/api-tokens
+
 # [[github]]
 # repo = "owner/transport-sim"
 # path = "~/code/transport-sim"   # local clone for worktrees
 # id_prefix = "TS"                # notes become TS-42-<slug>.md
 # search = "assignee:@me"
+# token_env = "GH_TOKEN"          # env var with the token (not the token itself)
 
 # [[jira]]
 # url = "https://yourcompany.atlassian.net"
 # email = "you@example.com"
-# token_env = "JIRA_API_TOKEN"
+# token_env = "JIRA_API_TOKEN"    # env var with the token (not the token itself)
 # jql = "assignee = currentUser() AND statusCategory != Done ORDER BY updated DESC"
 # path = "~/code/backend"
 "#;
@@ -314,7 +330,8 @@ impl Config {
 
 /// What a folder's own config may set. A cloned repo can ship
 /// `.salash/config.toml`, so nothing that runs commands or sends credentials:
-/// no `*_command`, no repo paths (worktrees run their hooks), no Jira.
+/// no `*_command`, no repo paths (worktrees run their hooks), no Jira, and no
+/// `token_env` (it would choose which env var's secret salash sends).
 const FOLDER_KEYS: &[&str] = &["vault", "notes_dir", "prefix", "local_prefix", "bell", "mouse", "github"];
 
 /// A folder's `.salash/config.toml`, cut down to `FOLDER_KEYS`, and the keys it lost.
@@ -331,8 +348,11 @@ fn folder_overlay(path: &Path) -> Result<(toml::Table, Vec<String>)> {
         }
         if k == "github" {
             for g in v.as_array_mut().into_iter().flatten().filter_map(|g| g.as_table_mut()) {
-                if g.remove("path").is_some() && !dropped.iter().any(|d| d == "github.path") {
-                    dropped.push("github.path".into());
+                for key in ["path", "token_env"] {
+                    let name = format!("github.{key}");
+                    if g.remove(key).is_some() && !dropped.contains(&name) {
+                        dropped.push(name);
+                    }
                 }
             }
         }
@@ -428,6 +448,27 @@ mod tests {
             assert!(dropped.iter().any(|d| d == k), "{k} not dropped: {dropped:?}");
             assert!(!t.contains_key(k));
         }
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn a_folder_config_cannot_pick_token_env() {
+        let dir = std::env::temp_dir().join(format!("salash-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let over = dir.join("config.toml");
+        std::fs::write(
+            &over,
+            r#"
+            [[github]]
+            repo = "a/one"
+            token_env = "AWS_SECRET_ACCESS_KEY"
+            "#,
+        )
+        .unwrap();
+        let (t, dropped) = folder_overlay(&over).unwrap();
+        assert_eq!(t["github"][0]["repo"].as_str(), Some("a/one"));
+        assert!(t["github"][0].get("token_env").is_none());
+        assert_eq!(dropped, vec!["github.token_env"]);
         std::fs::remove_dir_all(dir).ok();
     }
 }
