@@ -7,6 +7,7 @@ mod complete;
 mod config;
 mod instance;
 mod keys;
+mod plugin;
 mod proto;
 mod providers;
 mod server;
@@ -64,8 +65,6 @@ enum Cmd {
         #[command(subcommand)]
         cmd: TabCmd,
     },
-    /// Install the /new-salash-tab Claude Code skill into ~/.claude/skills.
-    InstallSkill,
 }
 
 #[derive(Subcommand)]
@@ -102,8 +101,6 @@ enum TabKindArg {
     Shell,
     Notes,
 }
-
-const SKILL: &str = include_str!("../skills/new-salash-tab/SKILL.md");
 
 /// The salash a command run here belongs to, if any. Its data dir applies
 /// from here on.
@@ -213,13 +210,6 @@ fn main() -> Result<()> {
                 bail!("{}", reply.error.unwrap_or_else(|| "failed".into()));
             }
             println!("tab:{} issue:{issue}", reply.tab.unwrap_or_default());
-            Ok(())
-        }
-        Some(Cmd::InstallSkill) => {
-            let p = status::claude_dir().join("skills").join("new-salash-tab").join("SKILL.md");
-            std::fs::create_dir_all(p.parent().unwrap())?;
-            std::fs::write(&p, SKILL)?;
-            println!("Skill written to {}", p.display());
             Ok(())
         }
         None => {
