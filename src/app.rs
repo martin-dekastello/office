@@ -202,7 +202,7 @@ impl IssueRt {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Focus {
     Sidebar,
     Terminal,
@@ -1429,8 +1429,10 @@ impl App {
                     self.set_view(s);
                     self.focus = Focus::Sidebar;
                 } else if let Some((_, id)) = self.item_hits.iter().find(|(r, _)| r.contains(pos)).cloned() {
+                    // Jump into the issue's last-active tab if it has a pane or a saved
+                    // screen. Unlike ⏎, a click never starts or resumes one.
                     self.select_id(id);
-                    self.focus = Focus::Sidebar;
+                    self.focus = if self.can_focus_terminal() { Focus::Terminal } else { Focus::Sidebar };
                 } else if self.term_rect.contains(pos) {
                     if self.can_focus_terminal() {
                         self.focus = Focus::Terminal;
@@ -1910,5 +1912,132 @@ mod tests {
         assert_eq!(activity(TabKind::Claude, None), idle);
         assert_eq!(activity(TabKind::Claude, Some(Exited)), idle);
         assert_eq!(level(&[(TabKind::Notes, None)]), 0);
+    }
+
+    /// Never run on a click: if one ever spawned, it would not be Claude.
+    const MUST_NOT_SPAWN: &str = "/nonexistent/salash-test-must-not-spawn";
+
+    /// A real App over a fresh vault holding `issues` in Active.
+    fn click_app(issues: &[&str]) -> (App, PathBuf) {
+        // Keep state.json, snapshots and status files away from the real
+        // instance. The dir is shared by every test in this process, so the
+        // tests below assert on in-memory state only.
+        crate::config::set_data_dir(std::env::temp_dir().join(format!("salash-unit-{}", std::process::id())));
+        let vault = std::env::temp_dir().join(format!("salash-test-{}", uuid::Uuid::new_v4()));
+        let cfg = Config {
+            vault: vault.clone(),
+            inject_hooks: false,
+            claude_command: vec![MUST_NOT_SPAWN.into()],
+            shell_command: vec![MUST_NOT_SPAWN.into()],
+            ..Default::default()
+        };
+        let mut app = App::new(cfg, false, vault.clone()).unwrap();
+        // Another test may have saved state in the shared dir; start clean.
+        app.state = State::default();
+        app.rt.clear();
+        for id in issues {
+            let note = NewNote { id, title: id, source: "local", url: None, repo: None, stage: Stage::Active };
+            app.vault.create(note).unwrap();
+        }
+        app.rescan();
+        app.view = Stage::Active;
+        app.selected = None;
+        app.focus = Focus::Sidebar;
+        (app, vault)
+    }
+
+    fn with_tabs(app: &mut App, id: &str, tabs: Vec<Tab>, active: usize) {
+        app.rt.insert(id.to_string(), IssueRt { tabs, active, ..Default::default() });
+    }
+
+    fn shell_tab() -> Tab {
+        let mut t = tab(ClaudeStatus::Exited, 0, None);
+        t.st.kind = TabKind::Shell;
+        t
+    }
+
+    fn suspended_tab() -> Tab {
+        let mut t = tab(ClaudeStatus::Exited, 0, None);
+        t.st.claude_session = Some("s".into());
+        t
+    }
+
+    /// Left-click the issue's row where the real layout draws it.
+    fn click(app: &mut App, id: &str) {
+        let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 30)).unwrap();
+        term.draw(|f| crate::ui::draw(app, f)).unwrap();
+        let r = app.item_hits.iter().find(|(_, i)| i == id).map(|(r, _)| *r).expect("issue row drawn");
+        let kind = MouseEventKind::Down(MouseButton::Left);
+        app.handle(Event::Mouse(MouseEvent { kind, column: r.x, row: r.y, modifiers: KeyModifiers::NONE }));
+    }
+
+    #[test]
+    fn clicking_an_issue_focuses_its_last_active_tab() {
+        let (mut app, vault) = click_app(&["a"]);
+        let argv = ["sh".to_string(), "-c".to_string(), "sleep 30".to_string()];
+        let mut running = shell_tab();
+        running.pane = Some(Pane::spawn(&argv, &vault, &[], 5, 40).unwrap());
+        with_tabs(&mut app, "a", vec![shell_tab(), running], 1);
+
+        click(&mut app, "a");
+        assert_eq!(app.selected.as_deref(), Some("a"));
+        assert_eq!(app.focus, Focus::Terminal);
+        assert_eq!(app.rt["a"].active, 1);
+        assert!(app.rt["a"].tabs[0].pane.is_none());
+
+        // Clicking the issue that is already selected also jumps into its tab.
+        app.focus = Focus::Sidebar;
+        click(&mut app, "a");
+        assert_eq!(app.selected.as_deref(), Some("a"));
+        assert_eq!(app.focus, Focus::Terminal);
+
+        // Dropping the pane kills `sleep`.
+        drop(app);
+        std::fs::remove_dir_all(vault).ok();
+    }
+
+    #[test]
+    fn clicking_an_issue_shows_a_suspended_tab_without_resuming_it() {
+        let (mut app, vault) = click_app(&["a"]);
+        with_tabs(&mut app, "a", vec![suspended_tab()], 0);
+
+        click(&mut app, "a");
+        assert_eq!(app.focus, Focus::Terminal);
+        let rt = &app.rt["a"];
+        assert_eq!(rt.tabs.len(), 1);
+        assert!(rt.tabs[0].pane.is_none() && rt.tabs[0].suspended());
+        std::fs::remove_dir_all(vault).ok();
+    }
+
+    #[test]
+    fn clicking_an_issue_without_a_live_tab_stays_in_the_sidebar() {
+        let (mut app, vault) = click_app(&["empty", "unstarted"]);
+        with_tabs(&mut app, "unstarted", vec![shell_tab()], 0);
+
+        click(&mut app, "empty");
+        assert_eq!(app.selected.as_deref(), Some("empty"));
+        assert_eq!(app.focus, Focus::Sidebar);
+        assert!(app.rt["empty"].tabs.is_empty() && app.rt["empty"].worktree.is_none());
+
+        click(&mut app, "unstarted");
+        assert_eq!(app.selected.as_deref(), Some("unstarted"));
+        assert_eq!(app.focus, Focus::Sidebar);
+        assert!(app.rt["unstarted"].tabs[0].pane.is_none());
+        std::fs::remove_dir_all(vault).ok();
+    }
+
+    #[test]
+    fn moving_with_keys_keeps_focus_in_the_sidebar() {
+        let (mut app, vault) = click_app(&["a", "b"]);
+        with_tabs(&mut app, "a", vec![suspended_tab()], 0);
+        with_tabs(&mut app, "b", vec![suspended_tab()], 0);
+        app.selected = Some("a".into());
+
+        for c in ['j', 'k'] {
+            app.handle(Event::Key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)));
+            assert_eq!(app.focus, Focus::Sidebar);
+        }
+        assert!(app.rt.values().flat_map(|rt| &rt.tabs).all(|t| t.pane.is_none()));
+        std::fs::remove_dir_all(vault).ok();
     }
 }
