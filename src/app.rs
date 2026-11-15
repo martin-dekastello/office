@@ -268,6 +268,8 @@ pub struct App {
     /// For the client whose input this is: what to copy or open on its side.
     pub outbox: Vec<ServerMsg>,
     hooks_settings: Option<PathBuf>,
+    /// The `--mcp-config` file Claude tabs get, unless `mcp = false`.
+    mcp_config: Option<PathBuf>,
     bell_pending: bool,
     // Hit areas from the last draw.
     pub term_rect: Rect,
@@ -311,6 +313,7 @@ impl App {
         let notes = vault.scan();
         let state = State::load();
         let hooks_settings = if cfg.inject_hooks { status::write_settings_file().ok() } else { None };
+        let mcp_config = if cfg.mcp { status::write_mcp_file(&folder).ok() } else { None };
         let prefix = keys::parse_prefix(&cfg.prefix);
         let mut app = App {
             selected: state.selected.clone().filter(|id| {
@@ -338,6 +341,7 @@ impl App {
             detach: false,
             outbox: vec![],
             hooks_settings,
+            mcp_config,
             bell_pending: false,
             term_rect: Rect::default(),
             sidebar_rect: Rect::default(),
@@ -764,6 +768,11 @@ impl App {
                     v.push("--settings".into());
                     v.push(s.to_string_lossy().into_owned());
                 }
+                // One argument: `--mcp-config` takes several values, so a
+                // separate path would take a first prompt after it as another.
+                if let Some(m) = &self.mcp_config {
+                    v.push(format!("--mcp-config={}", m.display()));
+                }
                 if let Some(sid) = &st.claude_session {
                     v.push("--resume".into());
                     v.push(sid.clone());
@@ -875,7 +884,7 @@ impl App {
         }
     }
 
-    fn open_requested(&mut self, req: Request) -> Reply {
+    pub fn open_requested(&mut self, req: Request) -> Reply {
         if let Err(e) = req.check() {
             return Reply::err(format!("{e:#}"));
         }

@@ -51,6 +51,9 @@ pub struct Config {
     /// Pass a generated `--settings` file to claude so status hooks work
     /// without touching ~/.claude/settings.json.
     pub inject_hooks: bool,
+    /// Give Claude tabs `salash mcp` (`claude --mcp-config`), so a session can
+    /// see salash's issues, tabs, their status and screens, and open tabs.
+    pub mcp: bool,
     /// Prefix key, tmux style: "ctrl-a", "ctrl-b", "ctrl-g", ...
     pub prefix: String,
     /// Prefix for locally created issues ("LOCAL-1").
@@ -90,6 +93,7 @@ impl Default for Config {
             shell_command: vec![],
             editor_command: vec![],
             inject_hooks: true,
+            mcp: true,
             prefix: "ctrl-a".into(),
             local_prefix: "LOCAL".into(),
             local_repo: None,
@@ -127,6 +131,7 @@ prefix = "ctrl-a"
 # shell_command  = []          # default: $SHELL / %COMSPEC%
 # editor_command = ["nvim"]    # default: $VISUAL / $EDITOR
 # inject_hooks = true          # pass status hooks via `claude --settings`
+# mcp = true                   # give Claude tabs `salash mcp`: issues, tabs, status, screens
 # local_prefix = "LOCAL"
 # local_repo = "/path/to/repo" # worktrees for local issues
 # bell = true

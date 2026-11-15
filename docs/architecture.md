@@ -40,6 +40,7 @@ on purpose: two servers for one folder would fight over its state and its tabs. 
   status/            Claude hook status, one file per tab
   requests/          `salash tab new` requests
   claude-hooks.json  the --settings file Claude tabs get
+  claude-mcp.json    the --mcp-config file Claude tabs get, unless mcp = false
 ```
 
 The folder's `config.toml` is merged over the global config. Tables merge key by key, and
@@ -100,6 +101,12 @@ To undo it, quit salash, then move `<folder>/.salash/state.json` (with `snapshot
   note or URL go back to the client whose input caused them and run there.
 - When the server quits, it saves the sessions as before, tells every client, removes the
   socket and stops the tabs.
+- **Queries.** `salash mcp` connects like a client but never sends its size, so it isn't
+  drawn for and gets no bell. It sends `Query` messages, which the main loop answers between
+  frames from the same channel as input, like a key press. Answers are built from memory and
+  the small hook status files. The server never replays a saved screen for a query: for a
+  suspended tab it answers with the snapshot's path, and `salash mcp` reads it. A screen query
+  reads only the rows asked for, at most 2000. Measured round trips were about 0.2 ms.
 
 ## Protocol (`src/proto.rs`)
 
@@ -109,11 +116,16 @@ Each frame is a tag byte, a big-endian `u32` length, then the payload. Frames ar
 | tag | direction | payload |
 |---|---|---|
 | 2 `Event` | client → server | a crossterm `Event` as JSON (key, mouse, paste, resize); the first is a `Resize` with the client's size |
+| 3 `Query` | client → server | `{"id", "body"}`: a question from `salash mcp` (`state`, `screen`, `open_tab`) as JSON |
 | 10 `Welcome` | server → client | capture the mouse or not (1 byte), protocol `VERSION` (1 byte) |
 | 11 `Output` | server → client | bytes to print |
 | 12 `Clipboard` | server → client | text to copy |
 | 13 `Open` | server → client | URL to open; the client only opens `http(s)://` and `obsidian://` |
 | 14 `Exit` | server → client | why: `detached`, `salash quit` |
+| 15 `Reply` | server → client | `{"id", "body"}`: the answer to the `Query` with that id, as JSON |
+
+Tags 4 and 16 are kept for change notifications to `salash mcp` (`Subscribe`, `Changed`),
+which don't exist yet.
 
 A client and a server from different builds (salash upgraded while a server ran) can meet. The
 client checks `VERSION` in `Welcome`, and a server from before there was one sends a single
@@ -141,3 +153,9 @@ from before versions sends tag 1, which a newer server rejects, closing the conn
   cross the socket, and std `File::try_lock`. The [`daemonize`](https://github.com/knsd/daemonize)
   crate forks, which is why it isn't used.
 - The folder that ignores itself is borrowed from pytest's `.pytest_cache/.gitignore`.
+- `salash mcp` follows **tmux control mode** ([wiki](https://github.com/tmux/tmux/wiki/Control-Mode)):
+  a client that gets state as text instead of a drawn screen. `read_screen` is
+  `capture-pane -p` (plain text, `-S` for history), and `list_tabs` is `list-panes -F`. The MCP
+  side is the official Rust SDK, [`rmcp`](https://github.com/modelcontextprotocol/rust-sdk),
+  with tokio only inside the `salash mcp` process. It handles both protocol generations Claude
+  Code speaks: `server/discover` (2026-07-28), then `initialize` (2025-11-25).

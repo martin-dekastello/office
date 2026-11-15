@@ -1,5 +1,6 @@
 //! The folder server end to end: start, refuse a second one, attach, detach,
-//! quit. Talks the wire protocol (src/proto.rs) by hand.
+//! quit, and `salash mcp` against it. Talks the wire protocol (src/proto.rs)
+//! and MCP's JSON-RPC by hand.
 #![cfg(unix)]
 
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
@@ -18,6 +19,11 @@ struct Env {
 
 impl Env {
     fn new() -> Env {
+        Env::with("")
+    }
+
+    /// With these lines added to the config.
+    fn with(config: &str) -> Env {
         // In /tmp rather than macOS's long $TMPDIR, so the socket fits in .salash.
         let id = uuid::Uuid::new_v4().simple().to_string();
         let root = std::fs::canonicalize("/tmp").unwrap().join(format!("salash-it-{}", &id[..12]));
@@ -27,7 +33,7 @@ impl Env {
         std::fs::create_dir_all(root.join("global")).unwrap();
         std::fs::write(
             root.join("config.toml"),
-            format!("vault = {:?}\nworktrees_dir = {:?}\n", root.join("vault"), root.join("wt")),
+            format!("vault = {:?}\nworktrees_dir = {:?}\n{config}", root.join("vault"), root.join("wt")),
         )
         .unwrap();
         Env { root, folder }
@@ -137,7 +143,7 @@ fn one_server_per_folder_with_attach_detach_and_quit() {
     let mut server = env.server();
     let mut a = env.connect();
     let (welcome, _) = until(&mut a, 10);
-    assert_eq!(welcome, [1, 1]); // mouse on by default, protocol version 1
+    assert_eq!(welcome, [1, 2]); // mouse on by default, protocol version 2
     hello(&mut a, 100, 30);
     let (_, _) = until(&mut a, 11);
 
@@ -232,4 +238,239 @@ fn global_state_moves_into_the_first_folder() {
 
 fn read_trim(p: &Path) -> String {
     std::fs::read_to_string(p).unwrap().trim().to_string()
+}
+
+// ---------- salash mcp ----------
+
+/// `salash mcp` on piped stdio, spoken to in JSON-RPC lines as Claude Code does.
+struct Mcp {
+    child: Child,
+    stdin: std::process::ChildStdin,
+    lines: std::sync::mpsc::Receiver<serde_json::Value>,
+    next: u64,
+}
+
+impl Mcp {
+    fn start(mut cmd: Command, folder: &Path) -> Mcp {
+        use std::io::BufRead;
+        let mut child = cmd
+            .arg("mcp")
+            .arg(folder)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let stdin = child.stdin.take().unwrap();
+        let out = std::io::BufReader::new(child.stdout.take().unwrap());
+        let (tx, lines) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            for l in out.lines() {
+                let Ok(l) = l else { return };
+                if tx.send(serde_json::from_str(&l).expect("stdout is only JSON-RPC")).is_err() {
+                    return;
+                }
+            }
+        });
+        let mut m = Mcp { child, stdin, lines, next: 0 };
+        let init = m.call(
+            "initialize",
+            serde_json::json!({
+                "protocolVersion": "2025-11-25",
+                "capabilities": {},
+                "clientInfo": { "name": "test", "version": "0" },
+            }),
+        );
+        assert_eq!(init["serverInfo"]["name"], "salash", "{init}");
+        m.notify("notifications/initialized");
+        m
+    }
+
+    fn notify(&mut self, method: &str) {
+        writeln!(self.stdin, "{}", serde_json::json!({ "jsonrpc": "2.0", "method": method })).unwrap();
+    }
+
+    /// The result of a request; panics on a JSON-RPC error.
+    fn call(&mut self, method: &str, params: serde_json::Value) -> serde_json::Value {
+        self.next += 1;
+        let id = self.next;
+        let req = serde_json::json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params });
+        writeln!(self.stdin, "{req}").unwrap();
+        loop {
+            let m = self.lines.recv_timeout(Duration::from_secs(10)).expect("no answer from salash mcp");
+            if m["id"] == id {
+                assert!(m.get("error").is_none(), "{method}: {m}");
+                return m["result"].clone();
+            }
+        }
+    }
+
+    /// A tool's text, and whether it is an error.
+    fn tool(&mut self, name: &str, args: serde_json::Value) -> (String, bool) {
+        let r = self.call("tools/call", serde_json::json!({ "name": name, "arguments": args }));
+        (r["content"][0]["text"].as_str().unwrap_or_default().to_string(), r["isError"] == true)
+    }
+
+    fn ok(&mut self, name: &str, args: serde_json::Value) -> serde_json::Value {
+        let (text, err) = self.tool(name, args);
+        assert!(!err, "{name}: {text}");
+        serde_json::from_str(&text).unwrap_or(serde_json::Value::String(text))
+    }
+}
+
+impl Drop for Mcp {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+/// A server stopped when the test ends, as it would outlive it.
+struct Stop(Child);
+
+impl Drop for Stop {
+    fn drop(&mut self) {
+        let _ = Command::new("kill").args(["-TERM", &self.0.id().to_string()]).status();
+        wait_exit(&mut self.0);
+    }
+}
+
+/// Wait for a condition on the server's state, as tabs start in the background.
+fn eventually<T>(mut f: impl FnMut() -> Option<T>) -> T {
+    let start = Instant::now();
+    loop {
+        if let Some(v) = f() {
+            return v;
+        }
+        assert!(start.elapsed() < Duration::from_secs(10), "timed out");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+const FAKES: &str = r#"
+shell_command = ["sh", "-c", 'printf "\033[1;31m日本\033[m hello\n"; exec cat']
+claude_command = ["sh", "-c", 'printf "%s\n" "$@" > argv.txt; exec cat', "claude"]
+"#;
+
+#[test]
+fn mcp_without_a_server_says_to_start_salash() {
+    let env = Env::new();
+    let o = env.run(&["mcp", env.folder.to_str().unwrap()]);
+    assert!(!o.status.success());
+    assert!(text(&o).contains("no salash running for") && text(&o).contains("start salash first"), "{}", text(&o));
+    assert!(o.stdout.is_empty(), "stdout is for JSON-RPC only");
+}
+
+#[test]
+fn mcp_against_another_version_says_how_to_stop_it() {
+    let env = Env::new();
+    std::fs::create_dir_all(env.folder.join(".salash")).unwrap();
+    let listener = std::os::unix::net::UnixListener::bind(env.socket()).unwrap();
+    std::thread::spawn(move || {
+        if let Ok((mut s, _)) = listener.accept() {
+            send(&mut s, 10, &[1, 1]); // a version-1 server
+            std::thread::sleep(Duration::from_secs(2));
+        }
+    });
+    let o = env.run(&["mcp", env.folder.to_str().unwrap()]);
+    assert!(!o.status.success());
+    assert!(text(&o).contains("another version") && text(&o).contains("kill $(cat"), "{}", text(&o));
+}
+
+#[test]
+fn mcp_answers_from_the_running_server() {
+    let env = Env::with(FAKES);
+    // A suspended Claude tab in Scratch, with a saved screen.
+    let dir = env.folder.join(".salash");
+    std::fs::create_dir_all(dir.join("snapshots")).unwrap();
+    let state = format!(
+        r#"{{"issues":{{"scratch":{{"worktree":null,"tabs":[{{"id":"t1","name":"old","kind":"claude","claude_session":"s1","cwd":{:?}}}]}}}}}}"#,
+        env.folder
+    );
+    std::fs::write(dir.join("state.json"), state).unwrap();
+    std::fs::write(dir.join("snapshots/t1.ansi"), "40\nsaved \x1b[1mscreen\x1b[m").unwrap();
+    let _server = Stop(env.server());
+    env.connect();
+
+    let mut m = Mcp::start(env.cmd(), &env.folder);
+    let tools = m.call("tools/list", serde_json::json!({}));
+    let mut names: Vec<&str> = tools["tools"].as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap()).collect();
+    names.sort();
+    assert_eq!(names, ["get_issue", "get_tab", "list_issues", "list_tabs", "open_tab", "read_screen"]);
+
+    // Outside a tab there is no "this tab" to default to.
+    let (e, err) = m.tool("read_screen", serde_json::json!({}));
+    assert!(err && e.contains("not inside a salash tab"), "{e}");
+
+    let issues = m.ok("list_issues", serde_json::json!({}));
+    assert_eq!(issues[0]["id"], "scratch", "{issues}");
+    assert_eq!(issues[0]["tabs"], 1);
+    let old = m.ok("get_tab", serde_json::json!({ "id": "t1" }));
+    assert_eq!(old["process"], "suspended", "{old}");
+    assert_eq!(old["claude"]["resume"], "claude --resume s1");
+    let saved = m.ok("read_screen", serde_json::json!({ "tab": "t1" }));
+    assert_eq!(saved, "saved screen\n");
+
+    // A shell tab: opened over MCP, then read back as plain text.
+    let opened = m.ok("open_tab", serde_json::json!({ "issue": "scratch", "kind": "shell" }));
+    let shell = opened["tab"].as_str().unwrap().to_string();
+    let screen = eventually(|| {
+        let (t, _) = m.tool("read_screen", serde_json::json!({ "tab": shell }));
+        t.contains("hello").then_some(t)
+    });
+    assert_eq!(screen, "日本 hello\n");
+    let tabs = m.ok("list_tabs", serde_json::json!({ "issue": "scratch" }));
+    assert_eq!(tabs.as_array().unwrap().len(), 2, "{tabs}");
+    let read = m.call("resources/read", serde_json::json!({ "uri": format!("salash://tab/{shell}/screen") }));
+    assert_eq!(read["contents"][0]["text"], "日本 hello\n");
+    let listed = m.call("resources/list", serde_json::json!({}));
+    assert!(listed.to_string().contains("salash://issue/scratch"), "{listed}");
+
+    // The same checks as `salash tab new`, and modes Claude may not choose for itself.
+    let (e, err) = m.tool("open_tab", serde_json::json!({ "issue": "scratch", "mode": "yolo" }));
+    assert!(err && e.contains("unknown mode"), "{e}");
+    for mode in ["bypassPermissions", "dontAsk"] {
+        let (e, err) = m.tool("open_tab", serde_json::json!({ "issue": "scratch", "mode": mode }));
+        assert!(err && e.contains("not allowed over MCP") && e.contains("salash tab new --mode"), "{e}");
+    }
+    let (e, err) = m.tool("get_issue", serde_json::json!({ "id": "NOPE-1" }));
+    assert!(err && e.contains("no issue NOPE-1"), "{e}");
+
+    // A Claude tab gets salash mcp, as one argument, after the hooks.
+    m.ok("open_tab", serde_json::json!({ "issue": "scratch", "mode": "plan", "prompt": "hi there" }));
+    let argv = eventually(|| std::fs::read_to_string(env.folder.join("argv.txt")).ok().filter(|a| a.contains("hi there")));
+    let config = dir.join("claude-mcp.json");
+    let args: Vec<&str> = argv.lines().collect();
+    assert!(args.contains(&format!("--mcp-config={}", config.display()).as_str()), "{argv}");
+    assert!(args.contains(&"--settings"), "{argv}");
+    assert_eq!(args.last(), Some(&"hi there"), "the prompt stays last: {argv}");
+    let config: serde_json::Value = serde_json::from_slice(&std::fs::read(&config).unwrap()).unwrap();
+    assert_eq!(config["mcpServers"]["salash"]["args"], serde_json::json!(["mcp", env.folder]));
+
+    // Inside that shell tab, "this tab" is the default and is marked.
+    let mut own = env.cmd();
+    own.env("SALASH_TAB", &shell).env("SALASH_ISSUE", "scratch").env("SALASH_DATA", &dir);
+    let mut inside = Mcp::start(own, &env.folder);
+    let me = inside.ok("get_tab", serde_json::json!({}));
+    assert_eq!(me["id"], shell.as_str());
+    assert_eq!(me["self"], true);
+    assert_eq!(inside.ok("read_screen", serde_json::json!({})), "日本 hello\n");
+    assert_eq!(inside.ok("get_issue", serde_json::json!({}))["id"], "scratch");
+
+    // A killed `salash mcp` leaves the server serving the next one.
+    drop(m);
+    drop(inside);
+    let mut again = Mcp::start(env.cmd(), &env.folder);
+    assert_eq!(again.ok("list_issues", serde_json::json!({}))[0]["tabs"], 3);
+}
+
+#[test]
+fn mcp_false_leaves_claude_without_it() {
+    let env = Env::with(&format!("{FAKES}mcp = false\n"));
+    let _server = Stop(env.server());
+    env.connect();
+    let mut m = Mcp::start(env.cmd(), &env.folder);
+    m.ok("open_tab", serde_json::json!({ "issue": "scratch", "prompt": "go" }));
+    let argv = eventually(|| std::fs::read_to_string(env.folder.join("argv.txt")).ok().filter(|a| a.contains("go")));
+    assert!(!argv.contains("--mcp-config"), "{argv}");
+    assert!(!env.folder.join(".salash/claude-mcp.json").exists());
 }

@@ -219,7 +219,7 @@ Each tab is started with `SALASH_TAB=<uuid>`. Claude tabs are launched as
 `claude --settings <data>/claude-hooks.json`. That file registers `salash hook` for
 `SessionStart`, `UserPromptSubmit`, `Pre/PostToolUse`, `PermissionRequest`,
 `Notification`, `Stop` and `SessionEnd`. The hook writes `<data>/status/<uuid>.json`
-and the UI polls it. The hook does nothing when `SALASH_TAB` isn't set, so it's safe to
+and the UI polls it. They also get `--mcp-config=<data>/claude-mcp.json` (see below). The hook does nothing when `SALASH_TAB` isn't set, so it's safe to
 install globally. If you'd rather not use `--settings`, set `inject_hooks = false` and run
 `salash install-hooks`. That merges the hooks into `~/.claude/settings.json` and writes
 a backup first.
@@ -251,6 +251,37 @@ one given with `--folder`.
 from the conversation and opens a new Claude tab in the same issue, started in that mode
 with the brief as its first prompt. It's like `/new-claude-tmux`, but without tmux.
 
+## Claude sees salash (MCP)
+
+`salash mcp [folder]` is an MCP server for Claude Code. It asks the folder's running salash
+about its issues, tabs, sessions and their status, and what a tab shows, and it can open tabs.
+The server stays the only owner of tabs and state. `salash mcp` fails if no salash runs
+there (`no salash running for <folder>; start salash first`) and never starts one.
+
+salash's own Claude tabs get it without any setup, with `--mcp-config` next to `--settings`.
+To turn that off, set `mcp = false` in your config. For Claude sessions outside salash:
+
+```sh
+claude mcp add salash -- salash mcp ~/work
+```
+
+| Tool | |
+|---|---|
+| `list_issues` | issues with stage, provider and URL, note, worktree and branch, the most urgent Claude status, tab count; filter by `stage` or `status`. Archive only when asked for |
+| `get_issue` | one issue with its tabs and its closed tabs (which `R` reopens) |
+| `list_tabs`, `get_tab` | tab id, name, kind, cwd, running/suspended/exited, and for Claude its session, status, last hook event and message, transcript and `claude --resume` command |
+| `read_screen` | what a tab shows, as plain text, like `tmux capture-pane -p`; with `scrollback`, the history above. A suspended tab gives its saved screen. Capped at 2000 lines and 32 KiB |
+| `open_tab` | the same as `salash tab new`: issue, kind, cwd, name, mode, prompt |
+
+The same comes as resources: `salash://issues`, `salash://issue/{id}`, `salash://tab/{id}` and
+`salash://tab/{id}/screen`. Inside a salash tab, tools without an issue or tab default to the
+caller's own, and the caller's tab is marked `"self": true`.
+
+Any Claude in a salash tab can read **every** tab's screen this way, in every issue: the same
+as anyone who can attach to salash. If that's too much, set `mcp = false`. `open_tab` refuses
+the modes `bypassPermissions` and `dontAsk`, so a session can't start another with fewer
+checks than its own. Run `salash tab new --mode …` yourself for those.
+
 ## CLI
 
 ```
@@ -263,6 +294,7 @@ salash install-hooks
 salash tab new [--issue ID] [--kind claude|shell|notes] [--cwd DIR] [--name NAME]
                [--mode MODE] [--prompt-file FILE] [--folder DIR]   # open a tab in a running salash
 salash install-skill   # add /new-salash-tab to ~/.claude/skills
+salash mcp [folder]    # MCP server on stdio for Claude Code (see above)
 ```
 
 ## Layout
@@ -272,6 +304,8 @@ src/
   server.rs     the folder's background server: clients, shared view, main loop
   client.rs     `salash` in your terminal: starts/attaches, forwards input, prints output
   proto.rs      client <-> server messages
+  query.rs      what `salash mcp` asks the server, and the answers
+  mcp.rs        `salash mcp`: the MCP server (rmcp) on stdio
   instance.rs   one salash per folder: .salash, socket, lock, moving old state
   app.rs        state, input routing, tab lifecycle, status polling
   ui.rs         ratatui rendering (sidebar, tab bar, terminal, popups)

@@ -7,8 +7,10 @@ mod complete;
 mod config;
 mod instance;
 mod keys;
+mod mcp;
 mod proto;
 mod providers;
+mod query;
 mod server;
 mod state;
 mod status;
@@ -66,6 +68,13 @@ enum Cmd {
     },
     /// Install the /new-salash-tab Claude Code skill into ~/.claude/skills.
     InstallSkill,
+    /// MCP server on stdio for Claude Code: issues, tabs, status and screens of
+    /// a running salash. Fails if none runs there; never starts one.
+    Mcp {
+        /// Folder of the salash; defaults to this tab's salash, else the
+        /// nearest folder above with a .salash.
+        folder: Option<PathBuf>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -222,6 +231,7 @@ fn main() -> Result<()> {
             println!("Skill written to {}", p.display());
             Ok(())
         }
+        Some(Cmd::Mcp { folder }) => mcp::run(mcp::instance(folder)?),
         None => {
             let inst = Instance::new(cli.folder.as_deref())?;
             if cli.attach { client::attach(&inst) } else { client::start(&inst) }

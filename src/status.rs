@@ -188,6 +188,20 @@ pub fn write_settings_file() -> Result<PathBuf> {
     Ok(path)
 }
 
+/// Write the file passed to `claude --mcp-config`: `salash mcp <folder>` as
+/// a stdio server named salash. Returns its path.
+pub fn write_mcp_file(folder: &std::path::Path) -> Result<PathBuf> {
+    let path = crate::config::data_dir().join("claude-mcp.json");
+    let exe = std::env::current_exe().context("locating salash executable")?;
+    let v = json!({ "mcpServers": { "salash": {
+        "type": "stdio",
+        "command": exe,
+        "args": ["mcp", folder],
+    }}});
+    std::fs::write(&path, serde_json::to_vec_pretty(&v)?)?;
+    Ok(path)
+}
+
 /// Claude Code's user folder: $CLAUDE_CONFIG_DIR or ~/.claude.
 pub fn claude_dir() -> PathBuf {
     std::env::var("CLAUDE_CONFIG_DIR")

@@ -45,6 +45,11 @@ window:
   Claude account, ssh agent). Being able to attach is the same as being able to run commands
   as that user. Grant it accordingly. tmux works the same way, which is why it added
   `server-access`.
+- **`salash mcp` reads through the same socket.** Whoever can attach can also run `salash mcp`
+  and read every tab's screen, in every issue, as plain text. salash's own Claude tabs get it
+  by default, so any Claude session in salash can read what every other tab shows. That is no
+  more than attaching already allows. `mcp = false` in your config turns it off for salash's
+  tabs. It doesn't stop someone who can attach from running `salash mcp` themselves.
 - The server and its tabs keep the environment of the `salash` that started them: `PATH`,
   `SSH_AUTH_SOCK`, tokens. Attaching later doesn't change it, much as tmux behaves without
   `update-environment`.

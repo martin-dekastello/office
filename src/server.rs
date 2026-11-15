@@ -337,6 +337,14 @@ impl Server {
                     self.clients.insert(id, c);
                 }
             }
+            Incoming::Msg(id, ClientMsg::Query { id: qid, query }) => {
+                let answer = crate::query::answer(app, query);
+                if let Some(c) = self.clients.get_mut(&id) {
+                    if !c.send(ServerMsg::Reply { id: qid, answer }) {
+                        self.clients.remove(&id);
+                    }
+                }
+            }
             Incoming::Msg(id, ClientMsg::Event(Event::Resize(cols, rows))) => {
                 if let Some(c) = self.clients.get_mut(&id) {
                     c.size = Some((cols.max(1), rows.max(1)));
@@ -366,8 +374,11 @@ impl Server {
         }
     }
 
+    /// Send to every terminal. A client that never sent its size, as
+    /// `salash mcp` doesn't, only asks questions: output would just pile up
+    /// in its backlog until a reply got dropped.
     fn broadcast(&mut self, m: ServerMsg) {
-        self.clients.retain(|_, c| c.send(m.clone()));
+        self.clients.retain(|_, c| c.size.is_none() || c.send(m.clone()));
     }
 
     fn render(&mut self, app: &mut App) {
