@@ -20,7 +20,7 @@ Run the release step by step. Stop and report to the user whenever a check fails
 Each archive has `salash`, `LICENSE` and `README.md`, plus a matching `.sha256` file. That makes 6 assets.
 
 **Not shipped, not tested:**
-- **Windows.** The only Windows requirement is a green Windows job in `ci.yml`.
+- **Windows.** Not a release gate. The Windows job in `ci.yml` may be red.
 - **Intel macOS.**
 
 Don't add targets as part of a release.
@@ -38,9 +38,12 @@ Use this isolated env in every shell that runs a salash binary, on macOS and ins
 export T=$(mktemp -d)
 export SALASH_DATA=$T/data SALASH_CONFIG=$T/config.toml HOME_TEST=$T/home
 unset SALASH_TAB SALASH_ISSUE
-mkdir -p $T/vault $HOME_TEST
+mkdir -p $T/vault $T/work $HOME_TEST
 printf 'vault = "%s/vault"\n' "$T" > $SALASH_CONFIG
+cd $T
 ```
+
+The `cd $T` matters. salash commands use the nearest `.salash` above the current directory, the way git finds `.git`, and that beats `SALASH_DATA`. The release worktree sits inside the user's salash folder, so running from it would use the real `.salash`. Set `B` to an absolute path before the `cd`.
 
 ## 0. Inputs and preflight
 
@@ -50,7 +53,7 @@ printf 'vault = "%s/vault"\n' "$T" > $SALASH_CONFIG
 2. In the main checkout:
    - `git fetch origin --tags`
    - the checkout is on `main`, `git status --porcelain` is empty except untracked files, and `git rev-parse main` equals `git rev-parse origin/main`
-3. CI must be green on that commit for ubuntu, macos **and windows**. Check with `gh run list --workflow ci.yml --branch main -L1 --json headSha,conclusion`. The `headSha` must be `main`'s HEAD.
+3. CI must be green on that commit for ubuntu and macos. Windows doesn't count. Find the run with `gh run list --workflow ci.yml --branch main -L1 --json databaseId,headSha`; the `headSha` must be `main`'s HEAD. Then check the jobs with `gh run view <id> --json jobs -q '.jobs[]|"\(.name): \(.conclusion)"'`. The run's overall conclusion fails when only Windows fails, so judge it per job.
 4. `git tag -l vX.Y.Z` and `gh release view vX.Y.Z` both show nothing, so the tag and release don't exist yet.
 
 ## 1. Release branch
@@ -82,16 +85,14 @@ If a fix is needed later, commit it on the release branch and move the tag with 
 
 ## 3. macOS test (Apple silicon, native)
 
-In the release worktree, with the isolated env:
-
-1. `cargo build --release`, then set `B=$PWD/target/release/salash`.
-2. Automated checks. They must all pass:
+1. In the release worktree, `cargo build --release`, then set `B=$PWD/target/release/salash`. Then set up the isolated env, which ends with `cd $T`.
+2. Automated checks, run from `$T`. They must all pass:
    - `$B --version` prints `salash X.Y.Z`
    - `$B --help`
    - `$B paths` shows config, data and notes under `$T`
    - `$B new release smoke test` then `$B list` shows the issue, and a note appears under `$T/vault`
    - `HOME=$HOME_TEST $B install-hooks` writes `$HOME_TEST/.claude/settings.json`
-   - `HOME=$HOME_TEST $B install-skill` writes `$HOME_TEST/.claude/skills/new-salash-tab/SKILL.md`
+   - the plugin gets written: start a headless server with `$B server $T/work &`, wait for `$T/work/.salash/plugin/.claude-plugin/plugin.json`, then kill the server. The manifest has `"version": "X.Y.Z"`, and `$T/work/.salash/plugin/skills/new-salash-tab/SKILL.md` exists.
 3. Manual checklist. Give it to the user. They run `$B $T/work` in a separate terminal with the same env vars. Get an explicit confirmation for each item:
    - [ ] It launches. Issues are on the left. Creating an issue writes its Obsidian note.
    - [ ] Open a Claude tab. It works, and the statuses show: working (yellow half-circle) and needs-you (triangle).
@@ -132,7 +133,7 @@ Use two dedicated Lima VMs. Never use the user's other VMs (`default`, `petarda-
    - `cargo test`
    - `cargo build --release --target $(uname -m)-unknown-linux-musl`
    - `file target/<target>/release/salash` says **statically linked**
-   - the same automated checks as macOS step 3.2: `--version`, `--help`, `paths`, `new`/`list`, `install-hooks`, `install-skill`
+   - the same automated checks as macOS step 3.2: `--version`, `--help`, `paths`, `new`/`list`, `install-hooks`, plugin
 5. Manual checklist, the same one as macOS step 3.3. The user runs `limactl shell salash-arm` (then `salash-x86`), sets the isolated env and runs the built binary.
    - Real Claude inside a VM needs `curl -fsSL https://claude.ai/install.sh | bash` and a `claude` login. Offer that.
    - On `salash-x86`, the user can skip the Claude-tab items because qemu is slow. On `salash-arm`, the suspend/resume item is required.

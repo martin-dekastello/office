@@ -68,7 +68,7 @@ Download the binary for your platform from
 Linux arm64 or Linux x86_64. The Linux builds are static (musl), so they run on any distro.
 
 ```sh
-tar xzf salash-v0.0.1-<target>.tar.gz
+tar xzf salash-v0.0.2-<target>.tar.gz
 mv salash ~/.local/bin/          # or anywhere on PATH
 xattr -d com.apple.quarantine ~/.local/bin/salash   # macOS only: the binary isn't signed
 ```
