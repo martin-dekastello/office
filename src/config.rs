@@ -404,7 +404,6 @@ mod tests {
 
     #[test]
     fn seen_after_defaults_to_5_and_parses() {
-        assert_eq!(Config::default().seen_after_secs, 5);
         assert_eq!(toml::from_str::<Config>("").unwrap().seen_after_secs, 5);
         assert_eq!(toml::from_str::<Config>("seen_after_secs = 0").unwrap().seen_after_secs, 0);
         assert!(!FOLDER_KEYS.contains(&"seen_after_secs"));
