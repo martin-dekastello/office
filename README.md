@@ -23,7 +23,8 @@ The name comes from the Slovak word *salaš*, a shepherd's hut up in the mountai
   Scratch stays first in every view and sort while it has tabs, and hides again once it has none.
 - **Claude status on every tab and issue**, set by Claude Code hooks:
   `◐` yellow = working (animated) · `▲` amber = needs you (permission/question) ·
-  `●` green = finished while you weren't looking · `○` idle · `✕` exited · `–` suspended.
+  `●` green = finished and not seen yet (a tab counts as seen once it has been on view for
+  `seen_after_secs`, default 5) · `○` idle · `✕` exited · `–` suspended.
   The status of the most urgent tab also shows on the issue in the sidebar.
   The terminal bell rings when a background tab needs you.
 - **Notes live in Obsidian**: `<vault>/<notes_dir>/{todo,active,done,archive}/<id>-<slug>.md`,
@@ -108,6 +109,7 @@ notes_dir = "Issues"
 worktrees_dir = "~/worktrees"
 prefix = "ctrl-a"
 theme = "auto"                  # auto | dark | light
+seen_after_secs = 5             # a finished tab stays unread until shown this long; 0 = at once
 
 [[github]]
 repo = "johan/transport-sim"

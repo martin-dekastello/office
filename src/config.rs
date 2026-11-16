@@ -59,6 +59,8 @@ pub struct Config {
     pub local_repo: Option<PathBuf>,
     /// Ring the host terminal bell when a background tab needs you or finishes.
     pub bell: bool,
+    /// Seconds a tab must stay on view before its "done" counts as seen. 0 = at once.
+    pub seen_after_secs: u64,
     /// Capture the mouse (click sidebar/tabs, wheel and clicks in tabs, drag to copy in shell tabs).
     /// Elsewhere, hold Shift/Option to select text.
     pub mouse: bool,
@@ -94,6 +96,7 @@ impl Default for Config {
             local_prefix: "LOCAL".into(),
             local_repo: None,
             bell: true,
+            seen_after_secs: 5,
             mouse: true,
             theme: "auto".into(),
             github: vec![],
@@ -130,6 +133,7 @@ prefix = "ctrl-a"
 # local_prefix = "LOCAL"
 # local_repo = "/path/to/repo" # worktrees for local issues
 # bell = true
+# seen_after_secs = 5        # a finished tab stays unread until shown this long; 0 = at once
 # mouse = true
 # theme = "auto"              # auto (follow the terminal) | dark | light
 
@@ -396,6 +400,13 @@ mod tests {
         assert_eq!(gh[0]["repo"].as_str(), Some("b/three"));
         assert_eq!(base["extra"]["x"].as_integer(), Some(1));
         assert_eq!(base["extra"]["y"].as_integer(), Some(3));
+    }
+
+    #[test]
+    fn seen_after_defaults_to_5_and_parses() {
+        assert_eq!(toml::from_str::<Config>("").unwrap().seen_after_secs, 5);
+        assert_eq!(toml::from_str::<Config>("seen_after_secs = 0").unwrap().seen_after_secs, 0);
+        assert!(!FOLDER_KEYS.contains(&"seen_after_secs"));
     }
 
     #[test]

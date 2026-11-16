@@ -50,7 +50,8 @@ impl Tab {
         Tab { st, pane: None, status: ClaudeStatus::Exited, status_ts: 0, seen_ts: 0, esc_ts: None, exit_check: None, first_args: vec![] }
     }
 
-    /// Status as shown: "Done" turns into "Idle" once you've looked at the tab.
+    /// Status as shown: "Done" turns into "Idle" once the tab has been on view
+    /// for `seen_after_secs`.
     pub fn shown_status(&self) -> ClaudeStatus {
         if self.status == ClaudeStatus::Done && self.status_ts <= self.seen_ts {
             ClaudeStatus::Idle
@@ -160,6 +161,21 @@ fn activity(kind: TabKind, status: Option<ClaudeStatus>) -> u8 {
 
 fn scratch_shown(tabs: usize, selected: bool) -> bool {
     tabs > 0 || selected
+}
+
+/// Track the tab on view. True once the same tab has been on view for `after`.
+fn dwell(on_view: &mut Option<(String, Instant)>, tab: Option<&str>, now: Instant, after: Duration) -> bool {
+    match (on_view.as_ref(), tab) {
+        (_, None) => {
+            *on_view = None;
+            false
+        }
+        (Some((id, since)), Some(t)) if id == t => now.saturating_duration_since(*since) >= after,
+        (_, Some(t)) => {
+            *on_view = Some((t.to_string(), now));
+            after.is_zero()
+        }
+    }
 }
 
 /// Where a tab that needs the issue's checkout starts.
@@ -287,6 +303,13 @@ pub struct App {
     last_scan: Instant,
     last_status: Instant,
     last_spin: Instant,
+    /// The tab on view and since when: it counts as seen after
+    /// `seen_after_secs`. One for everyone while all clients share one view.
+    /// Monotonic, so a clock step or sleep doesn't mark it seen.
+    on_view: Option<(String, Instant)>,
+    /// The selected issue and since when (ms, like `seen_ts`): a Done seen
+    /// meanwhile keeps its rank, so the list doesn't reorder under the cursor.
+    held: Option<(String, i64)>,
 }
 
 fn now_ms() -> i64 {
@@ -351,8 +374,31 @@ impl App {
                 None
             }
         };
+        let mut app = App::with_parts(cfg, folder, vault, notes, state, hooks_settings, plugin_dir);
+        if let Some(n) = app.selected_note() {
+            app.view = n.stage;
+        } else if app.count(Stage::Active) == 0 {
+            app.view = Stage::Todo;
+        }
+        if app.selected.is_none() {
+            app.selected = app.rows().first().cloned();
+        }
+        if let Some(id) = app.selected.clone() {
+            app.rt_for(&id);
+        }
+        if first_run {
+            app.flash(format!("Created {} — set your vault and sources there", crate::config::config_path().display()));
+        } else if app.notes.is_empty() {
+            app.flash("No issues yet: n = new local issue, S = sync GitHub/Jira".into());
+        }
+        app.start_sync();
+        Ok(app)
+    }
+
+    /// The app over what `new` loaded, with no disk access and no sync.
+    fn with_parts(cfg: Config, folder: PathBuf, vault: Vault, notes: Vec<Note>, state: State, hooks_settings: Option<PathBuf>, plugin_dir: Option<PathBuf>) -> App {
         let prefix = keys::parse_prefix(&cfg.prefix);
-        let mut app = App {
+        App {
             selected: state.selected.clone().filter(|id| {
                 notes.iter().any(|n| &n.id == id)
                     || (id == SCRATCH && state.issues.get(SCRATCH).is_some_and(|s| !s.tabs.is_empty()))
@@ -392,25 +438,9 @@ impl App {
             last_scan: Instant::now(),
             last_status: Instant::now(),
             last_spin: Instant::now(),
-        };
-        if let Some(n) = app.selected_note() {
-            app.view = n.stage;
-        } else if app.count(Stage::Active) == 0 {
-            app.view = Stage::Todo;
+            on_view: None,
+            held: None,
         }
-        if app.selected.is_none() {
-            app.selected = app.rows().first().cloned();
-        }
-        if let Some(id) = app.selected.clone() {
-            app.rt_for(&id);
-        }
-        if first_run {
-            app.flash(format!("Created {} — set your vault and sources there", crate::config::config_path().display()));
-        } else if app.notes.is_empty() {
-            app.flash("No issues yet: n = new local issue, S = sync GitHub/Jira".into());
-        }
-        app.start_sync();
-        Ok(app)
     }
 
     pub fn flash(&mut self, s: String) {
@@ -456,11 +486,20 @@ impl App {
             Some(rt) => rt
                 .tabs
                 .iter()
-                .map(|t| activity(t.st.kind, t.running().then(|| t.shown_status())))
+                .map(|t| activity(t.st.kind, t.running().then(|| self.ranked_status(id, t))))
                 .max(),
             None => self.state.issues.get(id).and_then(|s| s.tabs.iter().map(|t| activity(t.kind, None)).max()),
         }
         .unwrap_or(0)
+    }
+
+    /// Status a tab ranks by in the activity sort: as shown, except that a
+    /// Done seen while its issue stayed selected still ranks as Done.
+    fn ranked_status(&self, id: &str, t: &Tab) -> ClaudeStatus {
+        match &self.held {
+            Some((h, since)) if h == id && t.status == ClaudeStatus::Done && t.seen_ts >= *since => ClaudeStatus::Done,
+            _ => t.shown_status(),
+        }
     }
 
     /// Scratch shows while it has tabs, or while it's selected so a first tab can be opened.
@@ -1174,10 +1213,30 @@ impl App {
         self.viewer = Snapshot::load(&state::snapshot_path(&tab), rows).map(|s| (tab, s));
     }
 
+    fn active_tab_mut(&mut self) -> Option<&mut Tab> {
+        let rt = self.rt.get_mut(self.selected.as_ref()?)?;
+        rt.tabs.get_mut(rt.active)
+    }
+
     fn active_pane_mut(&mut self) -> Option<&mut Pane> {
-        let id = self.selected.clone()?;
-        let rt = self.rt.get_mut(&id)?;
-        rt.tabs.get_mut(rt.active)?.pane.as_mut()
+        self.active_tab_mut()?.pane.as_mut()
+    }
+
+    /// Mark the tab on view as seen once it has stayed on view for
+    /// `seen_after_secs`, so flicking past a finished tab doesn't count as
+    /// reading it. Switching issue or tab changes the id on view, which
+    /// restarts the timer; so does an overlay covering the pane.
+    fn mark_seen(&mut self, now: Instant) {
+        if self.held.as_ref().map(|(id, _)| id) != self.selected.as_ref() {
+            self.held = self.selected.clone().map(|id| (id, now_ms()));
+        }
+        let covered = !matches!(self.mode, Mode::Normal | Mode::Prefix);
+        let tab = if covered { None } else { self.active_tab().map(|t| t.st.id.clone()) };
+        if dwell(&mut self.on_view, tab.as_deref(), now, Duration::from_secs(self.cfg.seen_after_secs)) {
+            if let Some(t) = self.active_tab_mut() {
+                t.seen_ts = now_ms();
+            }
+        }
     }
 
     // ---------- periodic work ----------
@@ -1200,15 +1259,8 @@ impl App {
             }
         }
 
-        // Mark the visible tab as seen.
+        self.mark_seen(Instant::now());
         let now = now_ms();
-        if let Some(id) = self.selected.clone() {
-            if let Some(rt) = self.rt.get_mut(&id) {
-                if let Some(t) = rt.tabs.get_mut(rt.active) {
-                    t.seen_ts = now;
-                }
-            }
-        }
 
         if self.last_status.elapsed() < Duration::from_millis(250) {
             return;
@@ -1345,6 +1397,9 @@ impl App {
             return;
         }
         if self.focus == Focus::Terminal {
+            if let Some(t) = self.active_tab_mut().filter(|t| t.pane.is_some()) {
+                t.seen_ts = now_ms();
+            }
             if let Some(p) = self.active_pane_mut() {
                 if p.bracketed_paste() {
                     let mut b = b"\x1b[200~".to_vec();
@@ -1609,6 +1664,8 @@ impl App {
                 let bytes = keys::encode(&k, p.application_cursor());
                 if !bytes.is_empty() {
                     p.write(&bytes);
+                    // Typing into the tab means you've read it.
+                    tab.seen_ts = now_ms();
                 }
             }
             _ => {
@@ -1884,6 +1941,164 @@ mod tests {
         assert!(t.suspended());
         t.st.kind = TabKind::Shell;
         assert!(!t.suspended());
+    }
+
+    #[test]
+    fn a_done_tab_reads_as_idle_only_once_seen() {
+        let mut t = tab(ClaudeStatus::Done, 1000, None);
+        assert_eq!(t.shown_status(), ClaudeStatus::Done);
+        t.seen_ts = 999;
+        assert_eq!(t.shown_status(), ClaudeStatus::Done);
+        t.seen_ts = 1000;
+        assert_eq!(t.shown_status(), ClaudeStatus::Idle);
+        let mut w = tab(ClaudeStatus::Working, 1000, None);
+        w.seen_ts = 5000;
+        assert_eq!(w.shown_status(), ClaudeStatus::Working);
+    }
+
+    #[test]
+    fn a_tab_counts_as_seen_after_staying_on_view() {
+        let t0 = Instant::now();
+        let at = |ms: u64| t0 + Duration::from_millis(ms);
+        let after = Duration::from_secs(5);
+        let mut v = None;
+        assert!(!dwell(&mut v, Some("a"), at(0), after));
+        assert!(!dwell(&mut v, Some("a"), at(4999), after));
+        assert!(dwell(&mut v, Some("a"), at(5000), after));
+        // Another tab, then back: the timer starts again.
+        assert!(!dwell(&mut v, Some("b"), at(6000), after));
+        assert!(!dwell(&mut v, Some("a"), at(7000), after));
+        assert!(!dwell(&mut v, Some("a"), at(11999), after));
+        assert!(dwell(&mut v, Some("a"), at(12000), after));
+        // Nothing on view resets it too.
+        assert!(!dwell(&mut v, None, at(12500), after));
+        assert!(!dwell(&mut v, Some("a"), at(13000), after));
+        // A zero delay counts at once.
+        assert!(dwell(&mut None, Some("a"), at(0), Duration::ZERO));
+    }
+
+    fn note(id: &str) -> Note {
+        Note {
+            id: id.into(),
+            title: id.into(),
+            stage: Stage::Active,
+            path: PathBuf::new(),
+            source: "local".into(),
+            url: None,
+            repo: None,
+            repo_path: None,
+            created: None,
+            moved: None,
+        }
+    }
+
+    /// Issues "a" and "b", each with Done tabs named by `tabs`, "a" selected.
+    /// Built in memory: no vault, state file or sync.
+    fn app(tabs: &[(&str, &[&str])]) -> App {
+        let notes = tabs.iter().map(|(id, _)| note(id)).collect();
+        let vault = Vault { root: PathBuf::from("/nonexistent") };
+        let mut app = App::with_parts(Config::default(), PathBuf::from("/"), vault, notes, State::default(), None, None);
+        for (id, ids) in tabs {
+            let tabs = ids
+                .iter()
+                .map(|t| {
+                    let mut tab = tab(ClaudeStatus::Done, 1, None);
+                    tab.st.id = (*t).into();
+                    tab
+                })
+                .collect();
+            app.rt.insert((*id).into(), IssueRt { tabs, ..Default::default() });
+        }
+        app.selected = Some(tabs[0].0.into());
+        app
+    }
+
+    fn shown(app: &App, issue: &str, idx: usize) -> ClaudeStatus {
+        app.rt[issue].tabs[idx].shown_status()
+    }
+
+    #[test]
+    fn flicking_past_an_issue_keeps_its_done_unread() {
+        let mut app = app(&[("a", &["a1"]), ("b", &["b1"])]);
+        let t0 = Instant::now();
+        let at = |s: u64| t0 + Duration::from_secs(s);
+        app.mark_seen(at(0));
+        app.mark_seen(at(3));
+        app.selected = Some("b".into());
+        app.mark_seen(at(4));
+        assert_eq!(shown(&app, "a", 0), ClaudeStatus::Done);
+        // Back on "a": the timer starts again from there.
+        app.selected = Some("a".into());
+        app.mark_seen(at(5));
+        app.mark_seen(at(9));
+        assert_eq!(shown(&app, "a", 0), ClaudeStatus::Done);
+        app.mark_seen(at(10));
+        assert_eq!(shown(&app, "a", 0), ClaudeStatus::Idle);
+        assert_eq!(shown(&app, "b", 0), ClaudeStatus::Done);
+    }
+
+    #[test]
+    fn switching_tab_restarts_the_timer_and_marks_the_tab_on_view() {
+        let mut app = app(&[("a", &["a1", "a2"])]);
+        let t0 = Instant::now();
+        let at = |s: u64| t0 + Duration::from_secs(s);
+        app.mark_seen(at(0));
+        app.rt.get_mut("a").unwrap().active = 1;
+        app.mark_seen(at(4));
+        app.mark_seen(at(8));
+        assert_eq!(shown(&app, "a", 1), ClaudeStatus::Done);
+        app.mark_seen(at(9));
+        assert_eq!(shown(&app, "a", 0), ClaudeStatus::Done);
+        assert_eq!(shown(&app, "a", 1), ClaudeStatus::Idle);
+    }
+
+    #[test]
+    fn no_tab_on_view_clears_the_timer() {
+        let mut app = app(&[("a", &["a1"])]);
+        app.mark_seen(Instant::now());
+        assert!(app.on_view.is_some());
+        app.rt.get_mut("a").unwrap().tabs.clear();
+        app.mark_seen(Instant::now());
+        assert!(app.on_view.is_none());
+    }
+
+    #[test]
+    fn a_zero_delay_marks_the_tab_seen_at_once() {
+        let mut app = app(&[("a", &["a1"])]);
+        app.cfg.seen_after_secs = 0;
+        app.mark_seen(Instant::now());
+        assert_eq!(shown(&app, "a", 0), ClaudeStatus::Idle);
+    }
+
+    #[test]
+    fn an_overlay_hides_the_tab() {
+        let mut app = app(&[("a", &["a1"])]);
+        let t0 = Instant::now();
+        app.mode = Mode::Help;
+        app.mark_seen(t0);
+        app.mark_seen(t0 + Duration::from_secs(10));
+        assert_eq!(shown(&app, "a", 0), ClaudeStatus::Done);
+        // Closing it starts the timer.
+        app.mode = Mode::Normal;
+        app.mark_seen(t0 + Duration::from_secs(11));
+        app.mark_seen(t0 + Duration::from_secs(16));
+        assert_eq!(shown(&app, "a", 0), ClaudeStatus::Idle);
+    }
+
+    #[test]
+    fn a_done_seen_while_selected_keeps_its_rank_until_you_move() {
+        let mut app = app(&[("a", &["a1"]), ("b", &["b1"])]);
+        let t0 = Instant::now();
+        app.mark_seen(t0);
+        app.mark_seen(t0 + Duration::from_secs(5));
+        let a1 = |app: &App| app.ranked_status("a", &app.rt["a"].tabs[0]);
+        assert_eq!(shown(&app, "a", 0), ClaudeStatus::Idle);
+        assert_eq!(a1(&app), ClaudeStatus::Done);
+        app.selected = Some("b".into());
+        app.mark_seen(t0 + Duration::from_secs(6));
+        assert_eq!(a1(&app), ClaudeStatus::Idle);
+        // "b" was only flicked past: it ranks as Done.
+        assert_eq!(app.ranked_status("b", &app.rt["b"].tabs[0]), ClaudeStatus::Done);
     }
 
     #[test]
