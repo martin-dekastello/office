@@ -38,6 +38,7 @@ impl Env {
         // Never the real config or the real global state.
         c.env("SALASH_CONFIG", self.root.join("config.toml"))
             .env("SALASH_DATA", self.root.join("global"))
+            .env("CLAUDE_CONFIG_DIR", self.root.join("claude"))
             .env_remove("SALASH_TAB")
             .current_dir(&self.root);
         c
@@ -141,6 +142,12 @@ fn one_server_per_folder_with_attach_detach_and_quit() {
     hello(&mut a, 100, 30);
     let (_, _) = until(&mut a, 11);
 
+    // Claude tabs get salash's skills from the folder's own plugin dir.
+    let plugin = env.folder.join(".salash/plugin");
+    let manifest = std::fs::read_to_string(plugin.join(".claude-plugin/plugin.json")).unwrap();
+    assert!(manifest.contains("\"name\": \"salash\""), "{manifest}");
+    assert!(plugin.join("skills/new-salash-tab/SKILL.md").is_file());
+
     // The folder is taken: starting again fails and says how to attach.
     let again = env.run(&[env.folder.to_str().unwrap()]);
     assert!(!again.status.success());
@@ -228,6 +235,37 @@ fn global_state_moves_into_the_first_folder() {
     assert!(env.folder.join(".salash/snapshots/t1.ansi").exists());
     assert!(!global.join("state.json").exists());
     assert_eq!(read_trim(&global.join("migrated")), env.folder.display().to_string());
+}
+
+#[test]
+fn without_injected_hooks_claude_still_gets_the_plugin() {
+    let env = Env::new();
+    // A fake claude that records its argv.
+    let argv = env.root.join("argv");
+    let script = format!("printf '%s\\n' \"$@\" > {argv:?}; sleep 30");
+    let mut cfg = std::fs::read_to_string(env.root.join("config.toml")).unwrap();
+    cfg += &format!("inject_hooks = false\nclaude_command = [\"sh\", \"-c\", {script:?}, \"claude\"]\n");
+    std::fs::write(env.root.join("config.toml"), cfg).unwrap();
+    let mut server = env.server();
+    let mut a = env.connect();
+    let _ = until(&mut a, 10);
+    hello(&mut a, 100, 30);
+    let _ = until(&mut a, 11);
+
+    let o = env.run(&["tab", "new", "--issue", "scratch", "--folder", env.folder.to_str().unwrap()]);
+    assert!(o.status.success(), "{}", text(&o));
+    let start = Instant::now();
+    while !argv.exists() && start.elapsed() < Duration::from_secs(10) {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let args = std::fs::read_to_string(&argv).unwrap_or_default();
+    let plugin = env.folder.join(".salash/plugin");
+    assert!(args.contains(&format!("--plugin-dir\n{}\n", plugin.display())), "{args}");
+    assert!(!args.contains("--settings"), "{args}");
+    assert!(plugin.join("skills/new-salash-tab/SKILL.md").is_file());
+
+    server.kill().ok();
+    server.wait().ok();
 }
 
 fn read_trim(p: &Path) -> String {

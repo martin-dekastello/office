@@ -2,6 +2,7 @@ use crate::api::{self, Reply, Request};
 use crate::complete::{self, Completion};
 use crate::config::Config;
 use crate::keys;
+use crate::plugin;
 use crate::proto::ServerMsg;
 use crate::providers::{self, SyncReport};
 use crate::state::{self, IssueState, SortMode, State, TabKind, TabState};
@@ -284,6 +285,8 @@ pub struct App {
     /// For the client whose input this is: what to copy or open on its side.
     pub outbox: Vec<ServerMsg>,
     hooks_settings: Option<PathBuf>,
+    /// salash's plugin (its skills), passed as `claude --plugin-dir`.
+    plugin_dir: Option<PathBuf>,
     bell_pending: bool,
     // Hit areas from the last draw.
     pub term_rect: Rect,
@@ -323,6 +326,34 @@ fn home() -> PathBuf {
     dirs::home_dir().unwrap_or_else(|| PathBuf::from("."))
 }
 
+/// Claude's argv: the configured command, salash's hooks settings and plugin
+/// when given, then `--resume <session>` or, on a first launch, `first_args`.
+fn claude_argv(
+    cmd: &[String],
+    settings: Option<&Path>,
+    plugin: Option<&Path>,
+    session: Option<&str>,
+    first_args: Vec<String>,
+) -> Vec<String> {
+    let mut v = cmd.to_vec();
+    if let Some(s) = settings {
+        v.push("--settings".into());
+        v.push(s.to_string_lossy().into_owned());
+    }
+    if let Some(p) = plugin {
+        v.push("--plugin-dir".into());
+        v.push(p.to_string_lossy().into_owned());
+    }
+    match session {
+        Some(sid) => {
+            v.push("--resume".into());
+            v.push(sid.into());
+        }
+        None => v.extend(first_args),
+    }
+    v
+}
+
 /// The saved default directory if it still exists, otherwise salash's folder.
 fn usable_default(saved: Option<&Path>, folder: &Path) -> PathBuf {
     saved.filter(|p| p.is_dir()).unwrap_or(folder).to_path_buf()
@@ -334,7 +365,16 @@ impl App {
         let notes = vault.scan();
         let state = State::load();
         let hooks_settings = if cfg.inject_hooks { status::write_settings_file().ok() } else { None };
-        let mut app = App::with_parts(cfg, folder, vault, notes, state, hooks_settings);
+        // Not tied to inject_hooks: --plugin-dir leaves ~/.claude alone.
+        let plugin_dir = crate::config::data_dir().join("plugin");
+        let plugin_dir = match plugin::write_to(&plugin_dir) {
+            Ok(()) => Some(plugin_dir),
+            Err(e) => {
+                eprintln!("writing salash's Claude plugin: {e:#}");
+                None
+            }
+        };
+        let mut app = App::with_parts(cfg, folder, vault, notes, state, hooks_settings, plugin_dir);
         if let Some(n) = app.selected_note() {
             app.view = n.stage;
         } else if app.count(Stage::Active) == 0 {
@@ -356,7 +396,7 @@ impl App {
     }
 
     /// The app over what `new` loaded, with no disk access and no sync.
-    fn with_parts(cfg: Config, folder: PathBuf, vault: Vault, notes: Vec<Note>, state: State, hooks_settings: Option<PathBuf>) -> App {
+    fn with_parts(cfg: Config, folder: PathBuf, vault: Vault, notes: Vec<Note>, state: State, hooks_settings: Option<PathBuf>, plugin_dir: Option<PathBuf>) -> App {
         let prefix = keys::parse_prefix(&cfg.prefix);
         App {
             selected: state.selected.clone().filter(|id| {
@@ -384,6 +424,7 @@ impl App {
             detach: false,
             outbox: vec![],
             hooks_settings,
+            plugin_dir,
             bell_pending: false,
             term_rect: Rect::default(),
             sidebar_rect: Rect::default(),
@@ -797,20 +838,13 @@ impl App {
         let st = tab.st.clone();
         let first_args = std::mem::take(&mut tab.first_args);
         let argv: Vec<String> = match st.kind {
-            TabKind::Claude => {
-                let mut v = self.cfg.claude_command.clone();
-                if let Some(s) = &self.hooks_settings {
-                    v.push("--settings".into());
-                    v.push(s.to_string_lossy().into_owned());
-                }
-                if let Some(sid) = &st.claude_session {
-                    v.push("--resume".into());
-                    v.push(sid.clone());
-                } else {
-                    v.extend(first_args);
-                }
-                v
-            }
+            TabKind::Claude => claude_argv(
+                &self.cfg.claude_command,
+                self.hooks_settings.as_deref(),
+                self.plugin_dir.as_deref(),
+                st.claude_session.as_deref(),
+                first_args,
+            ),
             TabKind::Shell => self.cfg.shell(),
             TabKind::Notes => {
                 let Some(note) = note else { return };
@@ -1849,6 +1883,28 @@ mod tests {
         Tab { status, status_ts, esc_ts, ..Tab::new(st) }
     }
 
+    fn strs(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn claude_gets_hooks_and_plugin_before_its_own_args() {
+        let (s, p) = (Path::new("/d/claude-hooks.json"), Path::new("/d/plugin"));
+        let first = claude_argv(&strs(&["claude"]), Some(s), Some(p), None, strs(&["--permission-mode", "plan", "brief"]));
+        assert_eq!(
+            first,
+            strs(&["claude", "--settings", "/d/claude-hooks.json", "--plugin-dir", "/d/plugin", "--permission-mode", "plan", "brief"])
+        );
+        let resumed = claude_argv(&strs(&["claude"]), Some(s), Some(p), Some("sid"), strs(&["ignored"]));
+        assert_eq!(resumed, strs(&["claude", "--settings", "/d/claude-hooks.json", "--plugin-dir", "/d/plugin", "--resume", "sid"]));
+    }
+
+    #[test]
+    fn without_injection_claude_gets_neither() {
+        let v = claude_argv(&strs(&["npx", "claude"]), None, None, Some("sid"), vec![]);
+        assert_eq!(v, strs(&["npx", "claude", "--resume", "sid"]));
+    }
+
     #[test]
     fn resolve_dir_accepts_only_directories() {
         let dir = std::env::temp_dir().join(format!("salash-test-{}", uuid::Uuid::new_v4()));
@@ -1941,7 +1997,7 @@ mod tests {
     fn app(tabs: &[(&str, &[&str])]) -> App {
         let notes = tabs.iter().map(|(id, _)| note(id)).collect();
         let vault = Vault { root: PathBuf::from("/nonexistent") };
-        let mut app = App::with_parts(Config::default(), PathBuf::from("/"), vault, notes, State::default(), None);
+        let mut app = App::with_parts(Config::default(), PathBuf::from("/"), vault, notes, State::default(), None, None);
         for (id, ids) in tabs {
             let tabs = ids
                 .iter()
