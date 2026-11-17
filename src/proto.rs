@@ -2,17 +2,23 @@
 //!
 //! A frame is a tag byte, a big-endian u32 length and the payload. The client
 //! sends what the user does as crossterm events; the server renders and sends
-//! back the bytes to print, like zellij does.
+//! back the bytes to print, like zellij does. `salash mcp` uses the same
+//! connection for queries instead (src/mcp.rs).
+//!
+//! Tags: 2-9 are client messages, 10-29 server messages. Tag 1 was the hello
+//! of clients from before versions and stays unused. 4 (`Subscribe`) and 16
+//! (`Changed`) are kept for change notifications to `salash mcp`.
 
+use crate::query::{Answer, Query};
 use anyhow::{bail, Context, Result};
 use crossterm::event::Event;
 use std::io::{Read, Write};
 
 /// Changes whenever a message changes, so a client and a server from different
 /// builds of salash (one upgraded while the other ran) tell rather than misread.
-pub const VERSION: u8 = 1;
-/// Larger frames mean the other end isn't salash. Clients only send events,
-/// pastes included; servers send whole screens.
+pub const VERSION: u8 = 2;
+/// Larger frames mean the other end isn't salash. Clients only send events
+/// and queries, pastes and prompts included; servers send whole screens.
 const MAX_CLIENT_FRAME: u32 = 16 << 20;
 const MAX_SERVER_FRAME: u32 = 64 << 20;
 
@@ -20,6 +26,8 @@ const MAX_SERVER_FRAME: u32 = 64 << 20;
 pub enum ClientMsg {
     /// What the user does. The first is a `Resize` with the terminal's size.
     Event(Event),
+    /// A question from `salash mcp`, answered with a `Reply` of the same id.
+    Query { id: u64, query: Query },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -35,6 +43,15 @@ pub enum ServerMsg {
     Open(String),
     /// The client is done: detached, or salash quit.
     Exit(String),
+    /// The answer to the `Query` with this id.
+    Reply { id: u64, answer: Answer },
+}
+
+/// The payload of a `Query` or `Reply`: the id that pairs them, and the body.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct Tagged<T> {
+    id: u64,
+    body: T,
 }
 
 fn write_frame(w: &mut impl Write, tag: u8, payload: &[u8]) -> std::io::Result<()> {
@@ -71,6 +88,9 @@ impl ClientMsg {
     pub fn write(&self, w: &mut impl Write) -> std::io::Result<()> {
         match self {
             ClientMsg::Event(e) => write_frame(w, 2, &serde_json::to_vec(e)?),
+            ClientMsg::Query { id, query } => {
+                write_frame(w, 3, &serde_json::to_vec(&Tagged { id: *id, body: query })?)
+            }
         }
     }
 
@@ -78,6 +98,10 @@ impl ClientMsg {
         let Some((tag, b)) = read_frame(r, MAX_CLIENT_FRAME)? else { return Ok(None) };
         Ok(Some(match tag {
             2 => ClientMsg::Event(serde_json::from_slice(&b).context("parsing event")?),
+            3 => {
+                let t: Tagged<Query> = serde_json::from_slice(&b).context("parsing query")?;
+                ClientMsg::Query { id: t.id, query: t.body }
+            }
             _ => bail!("unknown client message {tag}"),
         }))
     }
@@ -91,6 +115,9 @@ impl ServerMsg {
             ServerMsg::Clipboard(s) => write_frame(w, 12, s.as_bytes()),
             ServerMsg::Open(s) => write_frame(w, 13, s.as_bytes()),
             ServerMsg::Exit(s) => write_frame(w, 14, s.as_bytes()),
+            ServerMsg::Reply { id, answer } => {
+                write_frame(w, 15, &serde_json::to_vec(&Tagged { id: *id, body: answer })?)
+            }
         }
     }
 
@@ -103,6 +130,10 @@ impl ServerMsg {
             12 => ServerMsg::Clipboard(text(b)?),
             13 => ServerMsg::Open(text(b)?),
             14 => ServerMsg::Exit(text(b)?),
+            15 => {
+                let t: Tagged<Answer> = serde_json::from_slice(&b).context("parsing reply")?;
+                ServerMsg::Reply { id: t.id, answer: t.body }
+            }
             _ => bail!("unknown server message {tag}"),
         }))
     }
@@ -119,6 +150,8 @@ mod tests {
             ClientMsg::Event(Event::Key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL))),
             ClientMsg::Event(Event::Paste("two\nlines".into())),
             ClientMsg::Event(Event::Resize(80, 24)),
+            ClientMsg::Query { id: 7, query: Query::State },
+            ClientMsg::Query { id: 8, query: Query::Screen { tab: "t".into(), lines: 40, scrollback: true } },
             ClientMsg::Event(Event::Mouse(MouseEvent {
                 kind: MouseEventKind::ScrollUp,
                 column: 3,
@@ -146,6 +179,8 @@ mod tests {
             ServerMsg::Clipboard("copied ✓".into()),
             ServerMsg::Open("obsidian://open?path=x".into()),
             ServerMsg::Exit("detached".into()),
+            ServerMsg::Reply { id: 7, answer: Answer::Screen("日本 ok\n".into()) },
+            ServerMsg::Reply { id: 9, answer: Answer::Error("no tab x".into()) },
         ];
         let mut buf = vec![];
         for m in &msgs {

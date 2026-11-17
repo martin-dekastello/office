@@ -221,7 +221,7 @@ impl IssueRt {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Focus {
     Sidebar,
     Terminal,
@@ -287,6 +287,8 @@ pub struct App {
     /// For the client whose input this is: what to copy or open on its side.
     pub outbox: Vec<ServerMsg>,
     hooks_settings: Option<PathBuf>,
+    /// The `--mcp-config` file Claude tabs get, unless `mcp = false`.
+    mcp_config: Option<PathBuf>,
     /// salash's plugin (its skills), passed as `claude --plugin-dir`.
     plugin_dir: Option<PathBuf>,
     bell_pending: bool,
@@ -328,12 +330,13 @@ fn home() -> PathBuf {
     dirs::home_dir().unwrap_or_else(|| PathBuf::from("."))
 }
 
-/// Claude's argv: the configured command, salash's hooks settings and plugin
-/// when given, then `--resume <session>` or, on a first launch, `first_args`.
+/// Claude's argv: the configured command, salash's hooks settings, plugin and
+/// MCP config when given, then `--resume <session>` or, on a first launch, `first_args`.
 fn claude_argv(
     cmd: &[String],
     settings: Option<&Path>,
     plugin: Option<&Path>,
+    mcp: Option<&Path>,
     session: Option<&str>,
     first_args: Vec<String>,
 ) -> Vec<String> {
@@ -345,6 +348,11 @@ fn claude_argv(
     if let Some(p) = plugin {
         v.push("--plugin-dir".into());
         v.push(p.to_string_lossy().into_owned());
+    }
+    // One argument: `--mcp-config` takes several values, so a separate path
+    // would take a first prompt after it as another.
+    if let Some(m) = mcp {
+        v.push(format!("--mcp-config={}", m.display()));
     }
     match session {
         Some(sid) => {
@@ -367,6 +375,7 @@ impl App {
         let notes = vault.scan();
         let state = State::load();
         let hooks_settings = if cfg.inject_hooks { status::write_settings_file().ok() } else { None };
+        let mcp_config = if cfg.mcp { status::write_mcp_file(&folder).ok() } else { None };
         // Not tied to inject_hooks: --plugin-dir leaves ~/.claude alone.
         let plugin_dir = crate::config::data_dir().join("plugin");
         let plugin_dir = match plugin::write_to(&plugin_dir) {
@@ -376,7 +385,7 @@ impl App {
                 None
             }
         };
-        let mut app = App::with_parts(cfg, folder, vault, notes, state, hooks_settings, plugin_dir);
+        let mut app = App::with_parts(cfg, folder, vault, notes, state, hooks_settings, mcp_config, plugin_dir);
         if let Some(n) = app.selected_note() {
             app.view = n.stage;
         } else if app.count(Stage::Active) == 0 {
@@ -398,7 +407,8 @@ impl App {
     }
 
     /// The app over what `new` loaded, with no disk access and no sync.
-    fn with_parts(cfg: Config, folder: PathBuf, vault: Vault, notes: Vec<Note>, state: State, hooks_settings: Option<PathBuf>, plugin_dir: Option<PathBuf>) -> App {
+    #[allow(clippy::too_many_arguments)]
+    fn with_parts(cfg: Config, folder: PathBuf, vault: Vault, notes: Vec<Note>, state: State, hooks_settings: Option<PathBuf>, mcp_config: Option<PathBuf>, plugin_dir: Option<PathBuf>) -> App {
         let prefix = keys::parse_prefix(&cfg.prefix);
         App {
             selected: state.selected.clone().filter(|id| {
@@ -426,6 +436,7 @@ impl App {
             detach: false,
             outbox: vec![],
             hooks_settings,
+            mcp_config,
             plugin_dir,
             bell_pending: false,
             term_rect: Rect::default(),
@@ -856,6 +867,7 @@ impl App {
                 &self.cfg.claude_command,
                 self.hooks_settings.as_deref(),
                 self.plugin_dir.as_deref(),
+                self.mcp_config.as_deref(),
                 st.claude_session.as_deref(),
                 first_args,
             ),
@@ -962,7 +974,7 @@ impl App {
         }
     }
 
-    fn open_requested(&mut self, req: Request) -> Reply {
+    pub fn open_requested(&mut self, req: Request) -> Reply {
         if let Err(e) = req.check() {
             return Reply::err(format!("{e:#}"));
         }
@@ -1532,8 +1544,9 @@ impl App {
                     self.set_view(s);
                     self.focus = Focus::Sidebar;
                 } else if let Some((_, id)) = self.item_hits.iter().find(|(r, _)| r.contains(pos)).cloned() {
+                    // Unlike ⏎, a click never starts, restarts or resumes a tab.
                     self.select_id(id);
-                    self.focus = Focus::Sidebar;
+                    self.focus_tab_if_live();
                 } else if self.term_rect.contains(pos) {
                     if self.can_focus_terminal() {
                         self.focus = Focus::Terminal;
@@ -1573,6 +1586,7 @@ impl App {
                     }
                 } else if self.sidebar_rect.contains(pos) {
                     self.move_selection(if up { -1 } else { 1 });
+                    self.after_issue_switch();
                 }
             }
             _ => {}
@@ -1780,7 +1794,7 @@ impl App {
             }
             KeyCode::Char('`') => {
                 self.select_id(SCRATCH.into());
-                self.focus = if self.can_focus_terminal() { Focus::Terminal } else { Focus::Sidebar };
+                self.focus_tab_if_live();
             }
             KeyCode::Char('q') => self.mode = Mode::Confirm(ConfirmKind::Quit),
             KeyCode::Char('D') => self.detach = true,
@@ -1838,8 +1852,14 @@ impl App {
         }
     }
 
-    /// When jumping issues from the terminal, stay in the terminal if the
-    /// target issue already has a running tab.
+    /// Focus the active tab if it has a pane (running or exited) or a saved
+    /// screen, else the sidebar. Never starts, restarts or resumes anything.
+    fn focus_tab_if_live(&mut self) {
+        self.focus = if self.can_focus_terminal() { Focus::Terminal } else { Focus::Sidebar };
+    }
+
+    /// When moving between issues from the terminal (prefix `j`/`k`, the
+    /// sidebar wheel), stay in the terminal only if the target's tab is live.
     fn after_issue_switch(&mut self) {
         if self.focus == Focus::Terminal && !self.can_focus_terminal() {
             self.focus = Focus::Sidebar;
@@ -1902,20 +1922,33 @@ mod tests {
     }
 
     #[test]
-    fn claude_gets_hooks_and_plugin_before_its_own_args() {
-        let (s, p) = (Path::new("/d/claude-hooks.json"), Path::new("/d/plugin"));
-        let first = claude_argv(&strs(&["claude"]), Some(s), Some(p), None, strs(&["--permission-mode", "plan", "brief"]));
+    fn claude_gets_hooks_plugin_and_mcp_before_its_own_args() {
+        let (s, p, m) = (Path::new("/d/claude-hooks.json"), Path::new("/d/plugin"), Path::new("/d/claude-mcp.json"));
+        let first = claude_argv(&strs(&["claude"]), Some(s), Some(p), Some(m), None, strs(&["--permission-mode", "plan", "brief"]));
         assert_eq!(
             first,
-            strs(&["claude", "--settings", "/d/claude-hooks.json", "--plugin-dir", "/d/plugin", "--permission-mode", "plan", "brief"])
+            strs(&[
+                "claude",
+                "--settings",
+                "/d/claude-hooks.json",
+                "--plugin-dir",
+                "/d/plugin",
+                "--mcp-config=/d/claude-mcp.json",
+                "--permission-mode",
+                "plan",
+                "brief"
+            ])
         );
-        let resumed = claude_argv(&strs(&["claude"]), Some(s), Some(p), Some("sid"), strs(&["ignored"]));
-        assert_eq!(resumed, strs(&["claude", "--settings", "/d/claude-hooks.json", "--plugin-dir", "/d/plugin", "--resume", "sid"]));
+        let resumed = claude_argv(&strs(&["claude"]), Some(s), Some(p), Some(m), Some("sid"), strs(&["ignored"]));
+        assert_eq!(
+            resumed,
+            strs(&["claude", "--settings", "/d/claude-hooks.json", "--plugin-dir", "/d/plugin", "--mcp-config=/d/claude-mcp.json", "--resume", "sid"])
+        );
     }
 
     #[test]
     fn without_injection_claude_gets_neither() {
-        let v = claude_argv(&strs(&["npx", "claude"]), None, None, Some("sid"), vec![]);
+        let v = claude_argv(&strs(&["npx", "claude"]), None, None, None, Some("sid"), vec![]);
         assert_eq!(v, strs(&["npx", "claude", "--resume", "sid"]));
     }
 
@@ -2011,7 +2044,7 @@ mod tests {
     fn app(tabs: &[(&str, &[&str])]) -> App {
         let notes = tabs.iter().map(|(id, _)| note(id)).collect();
         let vault = Vault { root: PathBuf::from("/nonexistent") };
-        let mut app = App::with_parts(Config::default(), PathBuf::from("/"), vault, notes, State::default(), None, None);
+        let mut app = App::with_parts(Config::default(), PathBuf::from("/"), vault, notes, State::default(), None, None, None);
         for (id, ids) in tabs {
             let tabs = ids
                 .iter()
@@ -2197,6 +2230,197 @@ mod tests {
         assert_eq!(level(&[(TabKind::Notes, None)]), 0);
     }
 
+    /// Never run on a click: if one ever spawned, it would not be Claude.
+    const MUST_NOT_SPAWN: &str = "/nonexistent/salash-test-must-not-spawn";
+
+    /// A vault dir removed on drop, even when an assertion fails first.
+    struct TempVault(PathBuf);
+
+    impl Drop for TempVault {
+        fn drop(&mut self) {
+            std::fs::remove_dir_all(&self.0).ok();
+        }
+    }
+
+    /// A real App over a fresh vault holding `issues` in Active. Keep the
+    /// returned guard alive for as long as the App.
+    fn click_app(issues: &[&str]) -> (App, TempVault) {
+        // The data dir (state.json, snapshots, status files) is set once per
+        // test binary. A fixed dir under target/ keeps it away from the real
+        // instance without leaking a new dir into /tmp on every run. Tests
+        // share it, so they assert on in-memory state only.
+        crate::config::set_data_dir(Path::new(env!("CARGO_MANIFEST_DIR")).join("target/salash-unit-data"));
+        let vault = TempVault(std::env::temp_dir().join(format!("salash-test-{}", uuid::Uuid::new_v4())));
+        let cfg = Config {
+            vault: vault.0.clone(),
+            inject_hooks: false,
+            claude_command: vec![MUST_NOT_SPAWN.into()],
+            shell_command: vec![MUST_NOT_SPAWN.into()],
+            ..Default::default()
+        };
+        let mut app = App::new(cfg, false, vault.0.clone()).unwrap();
+        // Another test may have saved state in the shared dir; start clean.
+        app.state = State::default();
+        app.rt.clear();
+        for id in issues {
+            let note = NewNote { id, title: id, source: "local", url: None, repo: None, stage: Stage::Active };
+            app.vault.create(note).unwrap();
+        }
+        app.rescan();
+        app.view = Stage::Active;
+        app.selected = None;
+        app.msg = None;
+        (app, vault)
+    }
+
+    fn with_tabs(app: &mut App, id: &str, tabs: Vec<Tab>, active: usize) {
+        app.rt.insert(id.to_string(), IssueRt { tabs, active, ..Default::default() });
+    }
+
+    /// A Claude tab with no pane and no session: never started.
+    fn unstarted_tab() -> Tab {
+        tab(ClaudeStatus::Exited, 0, None)
+    }
+
+    fn suspended_tab() -> Tab {
+        let mut t = unstarted_tab();
+        t.st.claude_session = Some("s".into());
+        t
+    }
+
+    /// A tab whose pane runs `sleep`; dropping the pane kills it.
+    fn running_tab(dir: &Path) -> Tab {
+        let argv = ["sh".to_string(), "-c".to_string(), "sleep 30".to_string()];
+        let mut t = unstarted_tab();
+        t.pane = Some(Pane::spawn(&argv, dir, &[], 5, 40).unwrap());
+        t
+    }
+
+    /// Nothing tried to spawn: a failed spawn would leave `pane == None` but flash.
+    fn assert_no_spawn(app: &App) {
+        assert!(app.msg.is_none(), "unexpected flash: {:?}", app.msg.as_ref().map(|m| &m.0));
+    }
+
+    /// Lay the screen out so the mouse hit rects are where the real UI draws them.
+    fn draw(app: &mut App) {
+        let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 30)).unwrap();
+        term.draw(|f| crate::ui::draw(app, f)).unwrap();
+    }
+
+    fn mouse(app: &mut App, kind: MouseEventKind, pos: Position) {
+        app.handle(Event::Mouse(MouseEvent { kind, column: pos.x, row: pos.y, modifiers: KeyModifiers::NONE }));
+    }
+
+    /// Left-click the issue's row.
+    fn click(app: &mut App, id: &str) {
+        draw(app);
+        let r = app.item_hits.iter().find(|(_, i)| i == id).map(|(r, _)| *r).expect("issue row drawn");
+        mouse(app, MouseEventKind::Down(MouseButton::Left), Position::new(r.x, r.y));
+    }
+
+    /// Scroll the wheel down once over the sidebar's issue list.
+    fn wheel_down_sidebar(app: &mut App) {
+        draw(app);
+        let pos = app.item_hits.first().expect("issue row drawn").0;
+        let pos = Position::new(pos.x, pos.y);
+        mouse(app, MouseEventKind::ScrollDown, pos);
+    }
+
+    #[test]
+    fn clicking_an_issue_focuses_its_last_active_tab() {
+        let (mut app, vault) = click_app(&["a"]);
+        with_tabs(&mut app, "a", vec![unstarted_tab(), running_tab(&vault.0)], 1);
+
+        click(&mut app, "a");
+        assert_eq!(app.selected.as_deref(), Some("a"));
+        assert_eq!(app.focus, Focus::Terminal);
+        assert_eq!(app.rt["a"].active, 1);
+        assert!(app.rt["a"].tabs[0].pane.is_none());
+        assert_no_spawn(&app);
+
+        // Clicking the issue that is already selected also jumps into its tab.
+        app.focus = Focus::Sidebar;
+        click(&mut app, "a");
+        assert_eq!(app.selected.as_deref(), Some("a"));
+        assert_eq!(app.focus, Focus::Terminal);
+        assert_no_spawn(&app);
+    }
+
+    #[test]
+    fn clicking_an_issue_shows_a_suspended_tab_without_resuming_it() {
+        let (mut app, _vault) = click_app(&["a"]);
+        with_tabs(&mut app, "a", vec![suspended_tab()], 0);
+
+        click(&mut app, "a");
+        assert_eq!(app.focus, Focus::Terminal);
+        let rt = &app.rt["a"];
+        assert_eq!(rt.tabs.len(), 1);
+        assert!(rt.tabs[0].pane.is_none() && rt.tabs[0].suspended());
+        assert_no_spawn(&app);
+    }
+
+    #[test]
+    fn clicking_an_issue_shows_an_exited_tab_without_restarting_it() {
+        let (mut app, vault) = click_app(&["a"]);
+        let mut exited = running_tab(&vault.0);
+        exited.pane.as_mut().unwrap().exited = Some(1);
+        with_tabs(&mut app, "a", vec![exited], 0);
+
+        click(&mut app, "a");
+        assert_eq!(app.focus, Focus::Terminal);
+        let rt = &app.rt["a"];
+        assert_eq!(rt.tabs.len(), 1);
+        assert_eq!(rt.tabs[0].pane.as_ref().and_then(|p| p.exited), Some(1));
+        assert_no_spawn(&app);
+    }
+
+    #[test]
+    fn clicking_an_issue_without_a_live_tab_stays_in_the_sidebar() {
+        let (mut app, _vault) = click_app(&["empty", "unstarted"]);
+        with_tabs(&mut app, "unstarted", vec![unstarted_tab()], 0);
+
+        click(&mut app, "empty");
+        assert_eq!(app.selected.as_deref(), Some("empty"));
+        assert_eq!(app.focus, Focus::Sidebar);
+        assert!(app.rt["empty"].tabs.is_empty() && app.rt["empty"].worktree.is_none());
+
+        click(&mut app, "unstarted");
+        assert_eq!(app.selected.as_deref(), Some("unstarted"));
+        assert_eq!(app.focus, Focus::Sidebar);
+        assert!(app.rt["unstarted"].tabs[0].pane.is_none());
+        assert_no_spawn(&app);
+    }
+
+    #[test]
+    fn moving_from_a_tab_to_an_issue_without_a_live_tab_focuses_the_sidebar() {
+        // The sidebar wheel and prefix j both leave a focused tab for the next issue.
+        let moves: [fn(&mut App); 2] = [wheel_down_sidebar, |app| {
+            let (code, mods) = app.prefix;
+            app.handle(Event::Key(KeyEvent::new(code, mods)));
+            app.handle(Event::Key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE)));
+        }];
+        for move_down in moves {
+            let (mut app, _vault) = click_app(&["a", "b", "c"]);
+            with_tabs(&mut app, "a", vec![suspended_tab()], 0);
+            with_tabs(&mut app, "b", vec![suspended_tab()], 0);
+            with_tabs(&mut app, "c", vec![unstarted_tab()], 0);
+            click(&mut app, "a");
+            assert_eq!(app.focus, Focus::Terminal);
+
+            // A suspended tab is live: stay in the terminal.
+            move_down(&mut app);
+            assert_eq!(app.selected.as_deref(), Some("b"));
+            assert_eq!(app.focus, Focus::Terminal);
+
+            // An unstarted tab is not: back to the sidebar.
+            move_down(&mut app);
+            assert_eq!(app.selected.as_deref(), Some("c"));
+            assert_eq!(app.focus, Focus::Sidebar);
+            assert!(app.rt.values().flat_map(|rt| &rt.tabs).all(|t| t.pane.is_none()));
+            assert_no_spawn(&app);
+        }
+    }
+
     fn temp_dir() -> PathBuf {
         let d = std::env::temp_dir().join(format!("salash-test-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&d).unwrap();
@@ -2208,7 +2432,7 @@ mod tests {
     fn worktree_app(cfg: Config, note: Note) -> App {
         crate::config::set_data_dir(std::env::temp_dir().join(format!("salash-test-data-{}", std::process::id())));
         let vault = Vault { root: PathBuf::from("/nonexistent") };
-        let mut app = App::with_parts(cfg, PathBuf::from("/"), vault, vec![note], State::default(), None, None);
+        let mut app = App::with_parts(cfg, PathBuf::from("/"), vault, vec![note], State::default(), None, None, None);
         let mut t = tab(ClaudeStatus::Idle, 0, None);
         t.st.id = "t".into();
         app.rt.insert("a".into(), IssueRt { tabs: vec![t], ..Default::default() });

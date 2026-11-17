@@ -20,7 +20,6 @@ Run the release step by step. Stop and report to the user whenever a check fails
 Each archive has `salash`, `LICENSE` and `README.md`, plus a matching `.sha256` file. That makes 6 assets.
 
 **Not shipped, not tested:**
-- **Windows.** Not a release gate. The Windows job in `ci.yml` may be red.
 - **Intel macOS.**
 
 Don't add targets as part of a release.
@@ -53,7 +52,7 @@ The `cd $T` matters. salash commands use the nearest `.salash` above the current
 2. In the main checkout:
    - `git fetch origin --tags`
    - the checkout is on `main`, `git status --porcelain` is empty except untracked files, and `git rev-parse main` equals `git rev-parse origin/main`
-3. CI must be green on that commit for ubuntu and macos. Windows doesn't count. Find the run with `gh run list --workflow ci.yml --branch main -L1 --json databaseId,headSha`; the `headSha` must be `main`'s HEAD. Then check the jobs with `gh run view <id> --json jobs -q '.jobs[]|"\(.name): \(.conclusion)"'`. The run's overall conclusion fails when only Windows fails, so judge it per job.
+3. CI must be green on that commit for ubuntu and macos. Find the run with `gh run list --workflow ci.yml --branch main -L1 --json databaseId,headSha`; the `headSha` must be `main`'s HEAD. Then check the jobs with `gh run view <id> --json jobs -q '.jobs[]|"\(.name): \(.conclusion)"'`.
 4. `git tag -l vX.Y.Z` and `gh release view vX.Y.Z` both show nothing, so the tag and release don't exist yet.
 
 ## 1. Release branch

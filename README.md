@@ -59,7 +59,7 @@ The name comes from the Slovak word *salaš*, a shepherd's hut up in the mountai
 - **Light and dark.** With `theme = "auto"` (the default) salash asks the terminal for its
   background colour at startup and matches it; set `"dark"` or `"light"` to choose. Programs in
   tabs that ask for the background (Claude Code, nvim) get the same answer.
-- **Cross-platform**: macOS, Linux, Windows (ConPTY). It's a single binary with its own
+- **macOS and Linux.** Windows isn't supported yet. It's a single binary with its own
   terminal emulation, so it doesn't need tmux.
 
 ## Install
@@ -97,7 +97,7 @@ Requirements: `claude` on PATH, `git` for worktrees, `gh` (logged in) for GitHub
 ## Config
 
 `~/.config/salash/config.toml` on Linux, `~/Library/Application Support/salash/config.toml`
-on macOS, `%APPDATA%\salash\config.toml` on Windows. Override with `$SALASH_CONFIG`.
+on macOS. Override with `$SALASH_CONFIG`.
 A folder's `.salash/config.toml` overrides some of it for that folder's salash: `vault`,
 `notes_dir`, `prefix`, `local_prefix`, `bell`, `mouse`, `worktrees` and `[[github]]` sources
 (without `path`). For example, give a team folder its own vault and sources. Commands, repo paths and
@@ -222,7 +222,11 @@ On a suspended tab, `⏎` resumes, and the wheel, `↑` `↓` `PgUp` `PgDn` `g` 
 Claude tabs per issue.
 
 The mouse is captured so you can click issues, tabs, the To-do/Active/Done/Archive views,
-a tab's `×` to close it, and `quit` at the top of the sidebar. Closing and quitting ask first. Inside a tab, the wheel, clicks and
+a tab's `×` to close it, and `quit` at the top of the sidebar. Clicking an issue jumps into
+its last-used tab when that tab has a process (running, or exited with its last screen) or
+is suspended. A suspended or exited tab stays stopped until `⏎`. An issue with no started
+tab only gets selected, and a click never starts a tab. To get back to the sidebar, press
+`prefix s` or click a view name. Closing and quitting ask first. Inside a tab, the wheel, clicks and
 drags go to the app when it handles the mouse itself, as Claude Code does with
 `"tui": "fullscreen"`. Apps on the alternate screen that don't (`less`) get arrow keys from
 the wheel. Anything else scrolls salash's scrollback.
@@ -240,10 +244,10 @@ Each tab is started with `SALASH_TAB=<uuid>`. Claude tabs are launched as
 salash's skills (see below) and is always passed. The settings file registers `salash hook` for
 `SessionStart`, `UserPromptSubmit`, `Pre/PostToolUse`, `PermissionRequest`,
 `Notification`, `Stop` and `SessionEnd`. The hook writes `<data>/status/<uuid>.json`
-and the UI polls it. The hook does nothing when `SALASH_TAB` isn't set, so it's safe to
-install globally. If you'd rather not use `--settings`, set
-`inject_hooks = false` and run `salash install-hooks`. That merges the hooks into
-`~/.claude/settings.json` and writes a backup first.
+and the UI polls it. They also get `--mcp-config=<data>/claude-mcp.json` (see below). The hook
+does nothing when `SALASH_TAB` isn't set, so it's safe to install globally. If you'd rather not
+use `--settings`, set `inject_hooks = false` and run `salash install-hooks`. That merges the
+hooks into `~/.claude/settings.json` and writes a backup first.
 
 Every tab also gets `SALASH_ISSUE`, `SALASH_NOTE` (the note's path), `SALASH_BIN` (the
 salash executable) and `SALASH_DATA` (its folder's `.salash`, where `<data>` is). You can tell
@@ -279,6 +283,37 @@ Older salash versions had `salash install-skill`. If you ran it, you can delete
 `~/.claude/skills/new-salash-tab`: until you do, the old copy shows up as `/new-salash-tab`
 next to `/salash:new-salash-tab`, and it doesn't change when salash is upgraded.
 
+## Claude sees salash (MCP)
+
+`salash mcp [folder]` is an MCP server for Claude Code. It asks the folder's running salash
+about its issues, tabs, sessions and their status, and what a tab shows, and it can open tabs.
+The server stays the only owner of tabs and state. `salash mcp` fails if no salash runs
+there (`no salash running for <folder>; start salash first`) and never starts one.
+
+salash's own Claude tabs get it without any setup, with `--mcp-config` next to `--settings`.
+To turn that off, set `mcp = false` in your config. For Claude sessions outside salash:
+
+```sh
+claude mcp add salash -- salash mcp ~/work
+```
+
+| Tool | |
+|---|---|
+| `list_issues` | issues with stage, provider and URL, note, worktree and branch, the most urgent Claude status, tab count; filter by `stage` or `status`. Archive only when asked for |
+| `get_issue` | one issue with its tabs and its closed tabs (which `R` reopens) |
+| `list_tabs`, `get_tab` | tab id, name, kind, cwd, running/suspended/exited, and for Claude its session, status, last hook event and message, transcript and `claude --resume` command |
+| `read_screen` | what a tab shows, as plain text, like `tmux capture-pane -p`; with `scrollback`, the history above. A suspended tab gives its saved screen. Capped at 2000 lines and 32 KiB |
+| `open_tab` | the same as `salash tab new`: issue, kind, cwd, name, mode, prompt |
+
+The same comes as resources: `salash://issues`, `salash://issue/{id}`, `salash://tab/{id}` and
+`salash://tab/{id}/screen`. Inside a salash tab, tools without an issue or tab default to the
+caller's own, and the caller's tab is marked `"self": true`.
+
+Any Claude in a salash tab can read **every** tab's screen this way, in every issue: the same
+as anyone who can attach to salash. If that's too much, set `mcp = false`. `open_tab` takes
+only the modes `plan` and `manual`, or none for your default, so a session can't start another
+with fewer checks than its own. Run `salash tab new --mode …` yourself for the others.
+
 ## CLI
 
 ```
@@ -290,6 +325,7 @@ salash list
 salash install-hooks
 salash tab new [--issue ID] [--kind claude|shell|notes] [--cwd DIR] [--name NAME]
                [--mode MODE] [--prompt-file FILE] [--folder DIR]   # open a tab in a running salash
+salash mcp [folder]    # MCP server on stdio for Claude Code (see above)
 ```
 
 ## Layout
@@ -299,6 +335,8 @@ src/
   server.rs     the folder's background server: clients, shared view, main loop
   client.rs     `salash` in your terminal: starts/attaches, forwards input, prints output
   proto.rs      client <-> server messages
+  query.rs      what `salash mcp` asks the server, and the answers
+  mcp.rs        `salash mcp`: the MCP server (rmcp) on stdio
   instance.rs   one salash per folder: .salash, socket, lock, moving old state
   app.rs        state, input routing, tab lifecycle, status polling
   ui.rs         ratatui rendering (sidebar, tab bar, terminal, popups)
@@ -320,8 +358,6 @@ src/
 - Tabs keep running while you're detached, but quitting salash stops them. Claude tabs
   resume from their session ID afterwards, shells don't. `kill $(cat <folder>/.salash/server.lock)`
   stops a server from outside the same way `q` does.
-- On Windows the server's named pipe has the default permissions, so other users on the same
-  machine may be able to attach. Use it single-user there for now.
 - Everyone attached shares one view, sized to the smallest client. Window-size options,
   per-client views and read-only clients are planned in [docs/multi-client.md](docs/multi-client.md).
 - OSC 52 isn't passed on, so text selected by dragging inside fullscreen Claude Code doesn't
