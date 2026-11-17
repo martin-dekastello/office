@@ -124,13 +124,6 @@ impl Instance {
         self.socket_path().to_fs_name::<GenericFilePath>().map(|n| n.into_owned())
     }
 
-    /// Named pipes don't live in the file system, so the name comes from the folder.
-    #[cfg(windows)]
-    pub fn socket_name(&self) -> std::io::Result<Name<'static>> {
-        use interprocess::local_socket::{GenericNamespaced, ToNsName};
-        format!("salash-{}.sock", hash(&self.folder)).to_ns_name::<GenericNamespaced>().map(|n| n.into_owned())
-    }
-
     pub fn lock_path(&self) -> PathBuf {
         self.dir.join("server.lock")
     }

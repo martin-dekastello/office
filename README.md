@@ -58,7 +58,7 @@ The name comes from the Slovak word *salaš*, a shepherd's hut up in the mountai
 - **Light and dark.** With `theme = "auto"` (the default) salash asks the terminal for its
   background colour at startup and matches it; set `"dark"` or `"light"` to choose. Programs in
   tabs that ask for the background (Claude Code, nvim) get the same answer.
-- **Cross-platform**: macOS, Linux, Windows (ConPTY). It's a single binary with its own
+- **macOS and Linux.** Windows isn't supported yet. It's a single binary with its own
   terminal emulation, so it doesn't need tmux.
 
 ## Install
@@ -96,7 +96,7 @@ Requirements: `claude` on PATH, `git` for worktrees, `gh` (logged in) for GitHub
 ## Config
 
 `~/.config/salash/config.toml` on Linux, `~/Library/Application Support/salash/config.toml`
-on macOS, `%APPDATA%\salash\config.toml` on Windows. Override with `$SALASH_CONFIG`.
+on macOS. Override with `$SALASH_CONFIG`.
 A folder's `.salash/config.toml` overrides some of it for that folder's salash: `vault`,
 `notes_dir`, `prefix`, `local_prefix`, `bell`, `mouse` and `[[github]]` sources (without
 `path`). For example, give a team folder its own vault and sources. Commands, repo paths and
@@ -302,8 +302,6 @@ src/
 - Tabs keep running while you're detached, but quitting salash stops them. Claude tabs
   resume from their session ID afterwards, shells don't. `kill $(cat <folder>/.salash/server.lock)`
   stops a server from outside the same way `q` does.
-- On Windows the server's named pipe has the default permissions, so other users on the same
-  machine may be able to attach. Use it single-user there for now.
 - Everyone attached shares one view, sized to the smallest client. Window-size options,
   per-client views and read-only clients are planned in [docs/multi-client.md](docs/multi-client.md).
 - OSC 52 isn't passed on, so text selected by dragging inside fullscreen Claude Code doesn't

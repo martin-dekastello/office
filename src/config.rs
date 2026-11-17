@@ -76,11 +76,7 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
-        let claude = if cfg!(windows) {
-            vec!["cmd".into(), "/C".into(), "claude".into()]
-        } else {
-            vec!["claude".into()]
-        };
+        let claude = vec!["claude".into()];
         Config {
             vault: dirs::document_dir()
                 .unwrap_or_else(|| home.clone())
@@ -271,11 +267,7 @@ impl Config {
         if !self.shell_command.is_empty() {
             return self.shell_command.clone();
         }
-        if cfg!(windows) {
-            vec![std::env::var("COMSPEC").unwrap_or_else(|_| "powershell.exe".into())]
-        } else {
-            vec![std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into())]
-        }
+        vec![std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into())]
     }
 
     pub fn editor(&self) -> Vec<String> {
@@ -290,11 +282,7 @@ impl Config {
                 }
             }
         }
-        if cfg!(windows) {
-            vec!["notepad".into()]
-        } else {
-            vec!["vi".into()]
-        }
+        vec!["vi".into()]
     }
 
     /// Resolve the local repository path for an issue.

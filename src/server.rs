@@ -183,8 +183,6 @@ fn lock(inst: &Instance) -> Result<std::fs::File> {
             Err(_) if Instant::now() < deadline && !inst.socket_path().exists() => {
                 std::thread::sleep(Duration::from_millis(50));
             }
-            #[cfg(windows)]
-            Err(_) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(50)),
             Err(e) => return Err(e),
         }
     }
@@ -443,13 +441,6 @@ pub fn spawn(inst: &Instance) -> Result<()> {
                 Ok(())
             });
         }
-    }
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        const DETACHED_PROCESS: u32 = 0x0000_0008;
-        const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
-        cmd.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
     }
     cmd.spawn().context("starting the salash server")?;
     Ok(())

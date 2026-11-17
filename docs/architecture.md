@@ -79,7 +79,7 @@ To undo it, quit salash, then move `<folder>/.salash/state.json` (with `snapshot
 ## Inside the server
 
 - `salash server <folder>` (hidden) is the server. `salash` starts it again from its own binary
-  with `setsid` on Unix, or `DETACHED_PROCESS` on Windows, with no stdin or stdout and stderr
+  with `setsid`, with no stdin or stdout and stderr
   going to `server.log`. It is a new process rather than a fork, because forking a process
   that already has threads isn't safe. zellij starts its server the same way.
 - Holding `server.lock` (std `File::try_lock`) makes the server the only one for its folder.
@@ -130,7 +130,7 @@ from before versions sends tag 1, which a newer server rejects, closing the conn
   the `window-size` option, and shares between users with `-S` and `server-access`. One
   difference: a tmux client passes its terminal's file descriptors to the server, which then
   writes to your tty directly. salash streams the rendered bytes over the socket instead, which
-  fits crossterm and ratatui, and works the same on Windows named pipes.
+  fits crossterm and ratatui.
 - **zellij** ([zellij-org/zellij](https://github.com/zellij-org/zellij)) is closest in how it
   is built: it starts its server by running its own binary again, sends serialized messages
   over IPC (`zellij-utils/src/ipc.rs`), the server renders, and clients print. Its
@@ -139,7 +139,7 @@ from before versions sends tag 1, which a newer server rejects, closing the conn
 - **dtach** ([crigler/dtach](https://github.com/crigler/dtach)) and **abduco**
   ([martanne/abduco](https://github.com/martanne/abduco)) do detach and nothing else.
 - Crates and std: [`interprocess`](https://github.com/kotauskas/interprocess) for local
-  sockets (Unix domain sockets, Windows named pipes), crossterm's `serde` feature so events can
+  sockets (Unix domain sockets), crossterm's `serde` feature so events can
   cross the socket, and std `File::try_lock`. The [`daemonize`](https://github.com/knsd/daemonize)
   crate forks, which is why it isn't used.
 - The folder that ignores itself is borrowed from pytest's `.pytest_cache/.gitignore`.
