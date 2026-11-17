@@ -8,6 +8,7 @@ mod config;
 mod instance;
 mod keys;
 mod mcp;
+mod plugin;
 mod proto;
 mod providers;
 mod query;
@@ -66,8 +67,6 @@ enum Cmd {
         #[command(subcommand)]
         cmd: TabCmd,
     },
-    /// Install the /new-salash-tab Claude Code skill into ~/.claude/skills.
-    InstallSkill,
     /// MCP server on stdio for Claude Code: issues, tabs, status and screens of
     /// a running salash. Fails if none runs there; never starts one.
     Mcp {
@@ -105,7 +104,6 @@ enum TabCmd {
     },
 }
 
-const SKILL: &str = include_str!("../skills/new-salash-tab/SKILL.md");
 
 /// The salash a command run here belongs to, if any. Its data dir applies
 /// from here on.
@@ -208,13 +206,6 @@ fn main() -> Result<()> {
                 bail!("{}", reply.error.unwrap_or_else(|| "failed".into()));
             }
             println!("tab:{} issue:{issue}", reply.tab.unwrap_or_default());
-            Ok(())
-        }
-        Some(Cmd::InstallSkill) => {
-            let p = status::claude_dir().join("skills").join("new-salash-tab").join("SKILL.md");
-            std::fs::create_dir_all(p.parent().unwrap())?;
-            std::fs::write(&p, SKILL)?;
-            println!("Skill written to {}", p.display());
             Ok(())
         }
         Some(Cmd::Mcp { folder }) => mcp::run(mcp::instance(folder)?),

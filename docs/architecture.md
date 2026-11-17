@@ -41,6 +41,8 @@ on purpose: two servers for one folder would fight over its state and its tabs. 
   requests/          `salash tab new` requests
   claude-hooks.json  the --settings file Claude tabs get
   claude-mcp.json    the --mcp-config file Claude tabs get, unless mcp = false
+  briefs/            handoff briefs written by /salash:new-salash-tab
+  plugin/            the --plugin-dir Claude tabs get: salash's skills, rewritten at every start
 ```
 
 The folder's `config.toml` is merged over the global config. Tables merge key by key, and
@@ -78,7 +80,7 @@ To undo it, quit salash, then move `<folder>/.salash/state.json` (with `snapshot
 ## Inside the server
 
 - `salash server <folder>` (hidden) is the server. `salash` starts it again from its own binary
-  with `setsid` on Unix, or `DETACHED_PROCESS` on Windows, with no stdin or stdout and stderr
+  with `setsid`, with no stdin or stdout and stderr
   going to `server.log`. It is a new process rather than a fork, because forking a process
   that already has threads isn't safe. zellij starts its server the same way.
 - Holding `server.lock` (std `File::try_lock`) makes the server the only one for its folder.
@@ -142,7 +144,7 @@ from before versions sends tag 1, which a newer server rejects, closing the conn
   the `window-size` option, and shares between users with `-S` and `server-access`. One
   difference: a tmux client passes its terminal's file descriptors to the server, which then
   writes to your tty directly. salash streams the rendered bytes over the socket instead, which
-  fits crossterm and ratatui, and works the same on Windows named pipes.
+  fits crossterm and ratatui.
 - **zellij** ([zellij-org/zellij](https://github.com/zellij-org/zellij)) is closest in how it
   is built: it starts its server by running its own binary again, sends serialized messages
   over IPC (`zellij-utils/src/ipc.rs`), the server renders, and clients print. Its
@@ -151,7 +153,7 @@ from before versions sends tag 1, which a newer server rejects, closing the conn
 - **dtach** ([crigler/dtach](https://github.com/crigler/dtach)) and **abduco**
   ([martanne/abduco](https://github.com/martanne/abduco)) do detach and nothing else.
 - Crates and std: [`interprocess`](https://github.com/kotauskas/interprocess) for local
-  sockets (Unix domain sockets, Windows named pipes), crossterm's `serde` feature so events can
+  sockets (Unix domain sockets), crossterm's `serde` feature so events can
   cross the socket, and std `File::try_lock`. The [`daemonize`](https://github.com/knsd/daemonize)
   crate forks, which is why it isn't used.
 - The folder that ignores itself is borrowed from pytest's `.pytest_cache/.gitignore`.
@@ -161,3 +163,11 @@ from before versions sends tag 1, which a newer server rejects, closing the conn
   side is the official Rust SDK, [`rmcp`](https://github.com/modelcontextprotocol/rust-sdk),
   with tokio only inside the `salash mcp` process. It handles both protocol generations Claude
   Code speaks: `server/discover` (2026-07-28), then `initialize` (2025-11-25).
+- salash's skills are a [Claude Code plugin](https://code.claude.com/docs/en/plugins/manifest-reference.md)
+  embedded with `include_str!`, written out at startup and passed per session with
+  `--plugin-dir`, as `claude-hooks.json` is with `--settings`. Unlike the hooks, it is passed even
+  with `inject_hooks = false`, since `--plugin-dir` writes nothing into `~/.claude`.
+  Plugins installed into a global folder, as tmux's [TPM](https://github.com/tmux-plugins/tpm)
+  does with `~/.tmux/plugins`, are what this avoids: such a copy shows up everywhere and stays
+  behind when the program is upgraded. Example plugins:
+  [anthropics/claude-code/plugins](https://github.com/anthropics/claude-code/tree/main/plugins).

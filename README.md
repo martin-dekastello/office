@@ -23,7 +23,8 @@ The name comes from the Slovak word *salaš*, a shepherd's hut up in the mountai
   Scratch stays first in every view and sort while it has tabs, and hides again once it has none.
 - **Claude status on every tab and issue**, set by Claude Code hooks:
   `◐` yellow = working (animated) · `▲` amber = needs you (permission/question) ·
-  `●` green = finished while you weren't looking · `○` idle · `✕` exited · `–` suspended.
+  `●` green = finished and not seen yet (a tab counts as seen once it has been on view for
+  `seen_after_secs`, default 5) · `○` idle · `✕` exited · `–` suspended.
   The status of the most urgent tab also shows on the issue in the sidebar.
   The terminal bell rings when a background tab needs you.
 - **Notes live in Obsidian**: `<vault>/<notes_dir>/{todo,active,done,archive}/<id>-<slug>.md`,
@@ -57,7 +58,7 @@ The name comes from the Slovak word *salaš*, a shepherd's hut up in the mountai
 - **Light and dark.** With `theme = "auto"` (the default) salash asks the terminal for its
   background colour at startup and matches it; set `"dark"` or `"light"` to choose. Programs in
   tabs that ask for the background (Claude Code, nvim) get the same answer.
-- **Cross-platform**: macOS, Linux, Windows (ConPTY). It's a single binary with its own
+- **macOS and Linux.** Windows isn't supported yet. It's a single binary with its own
   terminal emulation, so it doesn't need tmux.
 
 ## Install
@@ -67,7 +68,7 @@ Download the binary for your platform from
 Linux arm64 or Linux x86_64. The Linux builds are static (musl), so they run on any distro.
 
 ```sh
-tar xzf salash-v0.0.1-<target>.tar.gz
+tar xzf salash-v0.0.2-<target>.tar.gz
 mv salash ~/.local/bin/          # or anywhere on PATH
 xattr -d com.apple.quarantine ~/.local/bin/salash   # macOS only: the binary isn't signed
 ```
@@ -95,7 +96,7 @@ Requirements: `claude` on PATH, `git` for worktrees, `gh` (logged in) for GitHub
 ## Config
 
 `~/.config/salash/config.toml` on Linux, `~/Library/Application Support/salash/config.toml`
-on macOS, `%APPDATA%\salash\config.toml` on Windows. Override with `$SALASH_CONFIG`.
+on macOS. Override with `$SALASH_CONFIG`.
 A folder's `.salash/config.toml` overrides some of it for that folder's salash: `vault`,
 `notes_dir`, `prefix`, `local_prefix`, `bell`, `mouse` and `[[github]]` sources (without
 `path`). For example, give a team folder its own vault and sources. Commands, repo paths and
@@ -108,6 +109,7 @@ notes_dir = "Issues"
 worktrees_dir = "~/worktrees"
 prefix = "ctrl-a"
 theme = "auto"                  # auto | dark | light
+seen_after_secs = 5             # a finished tab stays unread until shown this long; 0 = at once
 
 [[github]]
 repo = "johan/transport-sim"
@@ -216,13 +218,14 @@ select text.
 ## How the Claude status works
 
 Each tab is started with `SALASH_TAB=<uuid>`. Claude tabs are launched as
-`claude --settings <data>/claude-hooks.json`. That file registers `salash hook` for
+`claude --settings <data>/claude-hooks.json --plugin-dir <data>/plugin`. The plugin holds
+salash's skills (see below) and is always passed. The settings file registers `salash hook` for
 `SessionStart`, `UserPromptSubmit`, `Pre/PostToolUse`, `PermissionRequest`,
 `Notification`, `Stop` and `SessionEnd`. The hook writes `<data>/status/<uuid>.json`
-and the UI polls it. They also get `--mcp-config=<data>/claude-mcp.json` (see below). The hook does nothing when `SALASH_TAB` isn't set, so it's safe to
-install globally. If you'd rather not use `--settings`, set `inject_hooks = false` and run
-`salash install-hooks`. That merges the hooks into `~/.claude/settings.json` and writes
-a backup first.
+and the UI polls it. They also get `--mcp-config=<data>/claude-mcp.json` (see below). The hook
+does nothing when `SALASH_TAB` isn't set, so it's safe to install globally. If you'd rather not
+use `--settings`, set `inject_hooks = false` and run `salash install-hooks`. That merges the
+hooks into `~/.claude/settings.json` and writes a backup first.
 
 Every tab also gets `SALASH_ISSUE`, `SALASH_NOTE` (the note's path), `SALASH_BIN` (the
 salash executable) and `SALASH_DATA` (its folder's `.salash`, where `<data>` is). You can tell
@@ -246,10 +249,17 @@ for salash to answer and fails if salash isn't running. Inside a tab it goes to 
 salash. Elsewhere it goes to the salash of the nearest folder above with a `.salash`, or the
 one given with `--folder`.
 
-`salash install-skill` adds the `/new-salash-tab` skill to `~/.claude/skills` (or
-`$CLAUDE_CONFIG_DIR`). In a Claude tab, `/new-salash-tab plan <task>` writes a handoff brief
-from the conversation and opens a new Claude tab in the same issue, started in that mode
-with the brief as its first prompt. It's like `/new-claude-tmux`, but without tmux.
+salash's own skills come as a Claude Code plugin named `salash`, built into the binary. Every
+time it starts, salash writes it to `<data>/plugin`, so it always matches the salash you have,
+and its Claude tabs load it with `--plugin-dir`. There is nothing to install, and Claude
+sessions outside salash never see it. In a Claude tab, `/salash:new-salash-tab plan <task>`
+writes a handoff brief from the conversation and opens a new Claude tab in the same issue,
+started in that mode with the brief as its first prompt. It's like `/new-claude-tmux`, but
+without tmux. Loading a plugin with `--plugin-dir` needs Claude Code 2.1.74 or later.
+
+Older salash versions had `salash install-skill`. If you ran it, you can delete
+`~/.claude/skills/new-salash-tab`: until you do, the old copy shows up as `/new-salash-tab`
+next to `/salash:new-salash-tab`, and it doesn't change when salash is upgraded.
 
 ## Claude sees salash (MCP)
 
@@ -293,7 +303,6 @@ salash list
 salash install-hooks
 salash tab new [--issue ID] [--kind claude|shell|notes] [--cwd DIR] [--name NAME]
                [--mode MODE] [--prompt-file FILE] [--folder DIR]   # open a tab in a running salash
-salash install-skill   # add /new-salash-tab to ~/.claude/skills
 salash mcp [folder]    # MCP server on stdio for Claude Code (see above)
 ```
 
@@ -315,6 +324,7 @@ src/
   vault.rs      Obsidian notes (todo/active/done/archive), slugs, frontmatter
   providers.rs  GitHub (gh), Jira REST v3
   status.rs     Claude Code hook handler and settings
+  plugin.rs     salash's skills as a Claude Code plugin, written to <data>/plugin
   api.rs        `salash tab new` requests to the running salash
   worktree.rs   per-issue git worktrees
   state.rs      persisted tabs, session IDs and saved screens
@@ -326,8 +336,6 @@ src/
 - Tabs keep running while you're detached, but quitting salash stops them. Claude tabs
   resume from their session ID afterwards, shells don't. `kill $(cat <folder>/.salash/server.lock)`
   stops a server from outside the same way `q` does.
-- On Windows the server's named pipe has the default permissions, so other users on the same
-  machine may be able to attach. Use it single-user there for now.
 - Everyone attached shares one view, sized to the smallest client. Window-size options,
   per-client views and read-only clients are planned in [docs/multi-client.md](docs/multi-client.md).
 - OSC 52 isn't passed on, so text selected by dragging inside fullscreen Claude Code doesn't

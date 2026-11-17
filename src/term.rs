@@ -1,4 +1,4 @@
-//! An embedded terminal: a child process on a PTY (ConPTY on Windows)
+//! An embedded terminal: a child process on a PTY
 //! parsed by vt100 and rendered with tui-term.
 
 use crate::keys;

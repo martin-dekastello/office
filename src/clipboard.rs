@@ -7,9 +7,7 @@ use std::process::{Command, Stdio};
 
 #[cfg(target_os = "macos")]
 const TOOLS: &[&[&str]] = &[&["pbcopy"]];
-#[cfg(windows)]
-const TOOLS: &[&[&str]] = &[&["clip"]];
-#[cfg(not(any(target_os = "macos", windows)))]
+#[cfg(not(target_os = "macos"))]
 const TOOLS: &[&[&str]] = &[
     &["wl-copy"],
     &["xclip", "-selection", "clipboard"],

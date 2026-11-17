@@ -48,8 +48,8 @@ pub struct Config {
     pub shell_command: Vec<String>,
     /// Command used for the notes tab. Empty = $VISUAL / $EDITOR / vi / notepad.
     pub editor_command: Vec<String>,
-    /// Pass a generated `--settings` file to claude so status hooks work
-    /// without touching ~/.claude/settings.json.
+    /// Pass a generated `--settings` file (status hooks) to claude, so they
+    /// don't have to go into ~/.claude.
     pub inject_hooks: bool,
     /// Give Claude tabs `salash mcp` (`claude --mcp-config`), so a session can
     /// see salash's issues, tabs, their status and screens, and open tabs.
@@ -62,6 +62,8 @@ pub struct Config {
     pub local_repo: Option<PathBuf>,
     /// Ring the host terminal bell when a background tab needs you or finishes.
     pub bell: bool,
+    /// Seconds a tab must stay on view before its "done" counts as seen. 0 = at once.
+    pub seen_after_secs: u64,
     /// Capture the mouse (click sidebar/tabs, wheel and clicks in tabs, drag to copy in shell tabs).
     /// Elsewhere, hold Shift/Option to select text.
     pub mouse: bool,
@@ -77,11 +79,7 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
-        let claude = if cfg!(windows) {
-            vec!["cmd".into(), "/C".into(), "claude".into()]
-        } else {
-            vec!["claude".into()]
-        };
+        let claude = vec!["claude".into()];
         Config {
             vault: dirs::document_dir()
                 .unwrap_or_else(|| home.clone())
@@ -98,6 +96,7 @@ impl Default for Config {
             local_prefix: "LOCAL".into(),
             local_repo: None,
             bell: true,
+            seen_after_secs: 5,
             mouse: true,
             theme: "auto".into(),
             github: vec![],
@@ -130,11 +129,12 @@ prefix = "ctrl-a"
 # claude_command = ["claude"]
 # shell_command  = []          # default: $SHELL / %COMSPEC%
 # editor_command = ["nvim"]    # default: $VISUAL / $EDITOR
-# inject_hooks = true          # pass status hooks via `claude --settings`
+# inject_hooks = true          # status hooks via `claude --settings`
 # mcp = true                   # give Claude tabs `salash mcp`: issues, tabs, status, screens
 # local_prefix = "LOCAL"
 # local_repo = "/path/to/repo" # worktrees for local issues
 # bell = true
+# seen_after_secs = 5        # a finished tab stays unread until shown this long; 0 = at once
 # mouse = true
 # theme = "auto"              # auto (follow the terminal) | dark | light
 
@@ -277,11 +277,7 @@ impl Config {
         if !self.shell_command.is_empty() {
             return self.shell_command.clone();
         }
-        if cfg!(windows) {
-            vec![std::env::var("COMSPEC").unwrap_or_else(|_| "powershell.exe".into())]
-        } else {
-            vec![std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into())]
-        }
+        vec![std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into())]
     }
 
     pub fn editor(&self) -> Vec<String> {
@@ -296,11 +292,7 @@ impl Config {
                 }
             }
         }
-        if cfg!(windows) {
-            vec!["notepad".into()]
-        } else {
-            vec!["vi".into()]
-        }
+        vec!["vi".into()]
     }
 
     /// Resolve the local repository path for an issue.
@@ -406,6 +398,13 @@ mod tests {
         assert_eq!(gh[0]["repo"].as_str(), Some("b/three"));
         assert_eq!(base["extra"]["x"].as_integer(), Some(1));
         assert_eq!(base["extra"]["y"].as_integer(), Some(3));
+    }
+
+    #[test]
+    fn seen_after_defaults_to_5_and_parses() {
+        assert_eq!(toml::from_str::<Config>("").unwrap().seen_after_secs, 5);
+        assert_eq!(toml::from_str::<Config>("seen_after_secs = 0").unwrap().seen_after_secs, 0);
+        assert!(!FOLDER_KEYS.contains(&"seen_after_secs"));
     }
 
     #[test]
