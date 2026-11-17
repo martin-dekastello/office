@@ -50,11 +50,12 @@ anything else replaces the global value, arrays included: a folder that lists `[
 sources gets only those, not the global ones as well.
 
 Only `vault`, `notes_dir`, `prefix`, `local_prefix`, `bell`, `mouse` and `[[github]]` (minus
-`path`) are taken from it (`FOLDER_KEYS` in `src/config.rs`). A repo can commit
+`path` and `token_env`) are taken from it (`FOLDER_KEYS` in `src/config.rs`). A repo can commit
 `.salash/config.toml` with `git add -f`, and the `.gitignore` salash writes doesn't stop a clone
 from bringing it along. So nothing that runs a command (`*_command`), points at a repository
 (`local_repo`, `path`: creating a worktree runs that repository's hooks) or sends a credential
-(`[[jira]]`) can come from the folder. The server logs the keys it ignored and flashes them.
+(`[[jira]]`, and `token_env`, which picks the env var whose secret is sent) can come from the
+folder. The server logs the keys it ignored and flashes them.
 
 Every tab gets `SALASH_DATA=<folder>/.salash`. That is how `salash hook` and `salash tab new`
 running inside a tab reach their own salash and not another folder's. Outside a tab, `salash

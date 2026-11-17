@@ -41,9 +41,9 @@ window:
 
   The socket's mode is set when the server starts, so restart salash after changing this.
 - **Everyone attached acts as the user who started the server.** Claude, shells and worktree
-  scripts all run as that user, with that user's credentials (`gh` login, `$JIRA_API_TOKEN`,
-  Claude account, ssh agent). Being able to attach is the same as being able to run commands
-  as that user. Grant it accordingly. tmux works the same way, which is why it added
+  scripts all run as that user, with that user's credentials (`gh` login, tokens from env vars
+  and the keychain, Claude account, ssh agent). Being able to attach is the same as being able
+  to run commands as that user. Grant it accordingly. tmux works the same way, which is why it added
   `server-access`.
 - **`salash mcp` reads through the same socket.** Whoever can attach can also run `salash mcp`
   and read every tab's screen, in every issue, as plain text. salash's own Claude tabs get it
