@@ -74,6 +74,8 @@ struct Client {
     writer: JoinHandle<()>,
     /// Columns and rows, once it sent its size.
     size: Option<(u16, u16)>,
+    /// It asked a `Query`: `salash mcp`, not a terminal. It gets replies only.
+    asks: bool,
     /// What its screen shows, for the diff. None means it needs a full redraw.
     term: Option<ClientTerm>,
     sink: Sink,
@@ -90,6 +92,12 @@ impl Client {
             }
             Err(TrySendError::Disconnected(_)) => false,
         }
+    }
+
+    /// Send a reply, which is never dropped: false on a full backlog too, so
+    /// the asker is cut off and asks again rather than waiting in vain.
+    fn reply(&mut self, m: ServerMsg) -> bool {
+        self.out.try_send(m).is_ok()
     }
 
     /// Send its last message, waiting behind a full backlog rather than
@@ -332,15 +340,21 @@ impl Server {
     fn on(&mut self, m: Incoming, app: &mut App) {
         match m {
             Incoming::Connected(id, out, writer) => {
-                let mut c = Client { out, writer, size: None, term: None, sink: Sink::default() };
+                let mut c = Client { out, writer, size: None, asks: false, term: None, sink: Sink::default() };
                 if c.send(ServerMsg::Welcome { version: crate::proto::VERSION, mouse: self.mouse }) {
                     self.clients.insert(id, c);
                 }
             }
             Incoming::Msg(id, ClientMsg::Query { id: qid, query }) => {
+                // An asker known to be gone isn't answered: opening its tab
+                // could only start a second one once it retries.
+                if !self.clients.contains_key(&id) {
+                    return;
+                }
                 let answer = crate::query::answer(app, query);
                 if let Some(c) = self.clients.get_mut(&id) {
-                    if !c.send(ServerMsg::Reply { id: qid, answer }) {
+                    c.asks = true;
+                    if !c.reply(ServerMsg::Reply { id: qid, answer }) {
                         self.clients.remove(&id);
                     }
                 }
@@ -374,11 +388,10 @@ impl Server {
         }
     }
 
-    /// Send to every terminal. A client that never sent its size, as
-    /// `salash mcp` doesn't, only asks questions: output would just pile up
-    /// in its backlog until a reply got dropped.
+    /// Send to every terminal, not to `salash mcp`: output it never reads
+    /// would only fill its backlog.
     fn broadcast(&mut self, m: ServerMsg) {
-        self.clients.retain(|_, c| c.size.is_none() || c.send(m.clone()));
+        self.clients.retain(|_, c| c.asks || c.send(m.clone()));
     }
 
     fn render(&mut self, app: &mut App) {
