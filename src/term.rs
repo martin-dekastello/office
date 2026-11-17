@@ -118,12 +118,15 @@ fn text(p: &mut Parser, lines: usize, scrollback: bool) -> String {
     let screen = p.screen_mut();
     let keep = screen.scrollback();
     let (rows, cols) = screen.size();
+    let history = scrollback && lines > 0;
     let lines = if lines == 0 { rows as usize } else { lines.min(MAX_LINES) };
     let mut out: Vec<String> = vec![];
-    if scrollback && lines > rows as usize {
-        // Only the history rows wanted, a page at a time, oldest first.
+    if history {
+        // Up to `lines` history rows, a page at a time, oldest first: the
+        // screen's trailing blanks are dropped below, so its rows can't be
+        // counted towards `lines` yet.
         screen.set_scrollback(usize::MAX);
-        let mut left = (lines - rows as usize).min(screen.scrollback());
+        let mut left = lines.min(screen.scrollback());
         while left > 0 {
             screen.set_scrollback(left);
             let n = left.min(rows as usize);
@@ -569,7 +572,8 @@ mod tests {
         p.screen_mut().set_scrollback(4);
         // The screen holds "line 8", "line 9" and the empty row the cursor is on.
         assert_eq!(text(&mut p, 50, false), "line 8\nline 9\n");
-        assert_eq!(text(&mut p, 5, true), "line 6\nline 7\nline 8\nline 9\n");
+        // The blank row the cursor is on doesn't count towards the five.
+        assert_eq!(text(&mut p, 5, true), "line 5\nline 6\nline 7\nline 8\nline 9\n");
         let all = text(&mut p, 50, true);
         assert!(all.starts_with("line 0\n") && all.ends_with("line 9\n"), "{all}");
         assert_eq!(text(&mut p, 1, true), "line 9\n", "the last rows win");
