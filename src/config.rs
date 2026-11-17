@@ -139,8 +139,8 @@ prefix = "ctrl-a"
 
 # Tokens never go in this file. For each source salash looks in token_env (if set),
 # then the keychain (`salash token set github:owner/repo` or `salash token set
-# jira:https://yourcompany.atlassian.net`), then $GH_TOKEN / $JIRA_API_TOKEN.
-# GitHub falls back to `gh`'s own login. `salash token status` shows what is used.
+# jira:https://yourcompany.atlassian.net`), then, without token_env, $GH_TOKEN /
+# $JIRA_API_TOKEN and gh's own login. `salash token status` shows what is used.
 #
 # Give tokens the least they need:
 # - GitHub: a fine-grained token for only the repos you sync, with Issues: read and
@@ -251,7 +251,8 @@ impl Config {
         let mut ignored = vec![];
         let mut sources = path.display().to_string();
         if let Some(over) = instance_dir.map(|d| d.join("config.toml")).filter(|p| p.exists()) {
-            let (t, dropped) = folder_overlay(&over)?;
+            let (mut t, dropped) = folder_overlay(&over)?;
+            keep_own_github_keys(&table, &mut t);
             if !dropped.is_empty() {
                 eprintln!("ignored in {}: {}", over.display(), dropped.join(", "));
             }
@@ -359,6 +360,23 @@ fn folder_overlay(path: &Path) -> Result<(toml::Table, Vec<String>)> {
         kept.insert(k, v);
     }
     Ok((kept, dropped))
+}
+
+/// A folder's `[[github]]` replaces yours, without `path` and `token_env`.
+/// For a repo your own config also lists, keep the ones you set there.
+fn keep_own_github_keys(own: &toml::Table, folder: &mut toml::Table) {
+    let Some(mine) = own.get("github").and_then(|g| g.as_array()) else { return };
+    let theirs = folder.get_mut("github").and_then(|g| g.as_array_mut());
+    for g in theirs.into_iter().flatten().filter_map(|g| g.as_table_mut()) {
+        let Some(m) = mine.iter().filter_map(|m| m.as_table()).find(|m| m.get("repo") == g.get("repo")) else {
+            continue;
+        };
+        for key in ["path", "token_env"] {
+            if let Some(v) = m.get(key) {
+                g.insert(key.into(), v.clone());
+            }
+        }
+    }
 }
 
 /// Put `over` on top of `base`: tables merge key by key, anything else
@@ -470,5 +488,34 @@ mod tests {
         assert!(t["github"][0].get("token_env").is_none());
         assert_eq!(dropped, vec!["github.token_env"]);
         std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn a_folder_github_keeps_your_own_path_and_token_env_for_the_same_repo() {
+        let own: toml::Table = toml::from_str(
+            r#"
+            [[github]]
+            repo = "a/one"
+            path = "~/code/one"
+            token_env = "WORK_GH_TOKEN"
+            "#,
+        )
+        .unwrap();
+        let mut folder: toml::Table = toml::from_str(
+            r#"
+            [[github]]
+            repo = "a/one"
+            search = "label:bug"
+            [[github]]
+            repo = "a/two"
+            "#,
+        )
+        .unwrap();
+        keep_own_github_keys(&own, &mut folder);
+        let g = &folder["github"];
+        assert_eq!(g[0]["token_env"].as_str(), Some("WORK_GH_TOKEN"));
+        assert_eq!(g[0]["path"].as_str(), Some("~/code/one"));
+        assert_eq!(g[0]["search"].as_str(), Some("label:bug"));
+        assert!(g[1].get("token_env").is_none());
     }
 }

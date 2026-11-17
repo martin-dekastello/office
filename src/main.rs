@@ -192,7 +192,7 @@ fn main() -> Result<()> {
             println!("worktrees {}", cfg.worktrees_dir.display());
             Ok(())
         }
-        Some(Cmd::Token { cmd }) => token::run(cmd, &load_config()?),
+        Some(Cmd::Token { cmd }) => token::run(cmd, load_config),
         Some(Cmd::Tab { cmd: TabCmd::New { issue, kind, cwd, name, mode, prompt_file, folder } }) => {
             match folder {
                 Some(f) => config::set_data_dir(Instance::new(Some(&f))?.dir),
