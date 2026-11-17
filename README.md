@@ -204,7 +204,11 @@ On a suspended tab, `⏎` resumes, and the wheel, `↑` `↓` `PgUp` `PgDn` `g` 
 Claude tabs per issue.
 
 The mouse is captured so you can click issues, tabs, the To-do/Active/Done/Archive views,
-a tab's `×` to close it, and `quit` at the top of the sidebar. Closing and quitting ask first. Inside a tab, the wheel, clicks and
+a tab's `×` to close it, and `quit` at the top of the sidebar. Clicking an issue jumps into
+its last-used tab when that tab has a process (running, or exited with its last screen) or
+is suspended. A suspended or exited tab stays stopped until `⏎`. An issue with no started
+tab only gets selected, and a click never starts a tab. To get back to the sidebar, press
+`prefix s` or click a view name. Closing and quitting ask first. Inside a tab, the wheel, clicks and
 drags go to the app when it handles the mouse itself, as Claude Code does with
 `"tui": "fullscreen"`. Apps on the alternate screen that don't (`less`) get arrow keys from
 the wheel. Anything else scrolls salash's scrollback.
