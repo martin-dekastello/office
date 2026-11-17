@@ -40,6 +40,9 @@ on purpose: two servers for one folder would fight over its state and its tabs. 
   status/            Claude hook status, one file per tab
   requests/          `salash tab new` requests
   claude-hooks.json  the --settings file Claude tabs get
+  claude-mcp.json    the --mcp-config file Claude tabs get, unless mcp = false
+  briefs/            handoff briefs written by /salash:new-salash-tab
+  plugin/            the --plugin-dir Claude tabs get: salash's skills, rewritten at every start
 ```
 
 The folder's `config.toml` is merged over the global config. Tables merge key by key, and
@@ -78,7 +81,7 @@ To undo it, quit salash, then move `<folder>/.salash/state.json` (with `snapshot
 ## Inside the server
 
 - `salash server <folder>` (hidden) is the server. `salash` starts it again from its own binary
-  with `setsid` on Unix, or `DETACHED_PROCESS` on Windows, with no stdin or stdout and stderr
+  with `setsid`, with no stdin or stdout and stderr
   going to `server.log`. It is a new process rather than a fork, because forking a process
   that already has threads isn't safe. zellij starts its server the same way.
 - Holding `server.lock` (std `File::try_lock`) makes the server the only one for its folder.
@@ -101,6 +104,14 @@ To undo it, quit salash, then move `<folder>/.salash/state.json` (with `snapshot
   note or URL go back to the client whose input caused them and run there.
 - When the server quits, it saves the sessions as before, tells every client, removes the
   socket and stops the tabs.
+- **Queries.** `salash mcp` connects like a client but never sends its size, so it isn't
+  drawn for. Once it sends a `Query` it is marked as asking and gets no broadcasts (the bell),
+  and its replies are never dropped: if its backlog is full it is cut off and reconnects. The
+  main loop answers queries between frames from the same channel as input, like a key press.
+  Answers are built from memory and the small hook status files, only for the issue or tab
+  asked about. The server never replays a saved screen for a query: for a
+  suspended tab it answers with the snapshot's path, and `salash mcp` reads it. A screen query
+  reads only the rows asked for, at most 2000. Measured round trips were about 0.2 ms.
 
 ## Protocol (`src/proto.rs`)
 
@@ -110,11 +121,16 @@ Each frame is a tag byte, a big-endian `u32` length, then the payload. Frames ar
 | tag | direction | payload |
 |---|---|---|
 | 2 `Event` | client → server | a crossterm `Event` as JSON (key, mouse, paste, resize); the first is a `Resize` with the client's size |
+| 3 `Query` | client → server | `{"id", "body"}`: a question from `salash mcp` (`state`, `issue`, `tab`, `screen`, `open_tab`) as JSON |
 | 10 `Welcome` | server → client | capture the mouse or not (1 byte), protocol `VERSION` (1 byte) |
 | 11 `Output` | server → client | bytes to print |
 | 12 `Clipboard` | server → client | text to copy |
 | 13 `Open` | server → client | URL to open; the client only opens `http(s)://` and `obsidian://` |
 | 14 `Exit` | server → client | why: `detached`, `salash quit` |
+| 15 `Reply` | server → client | `{"id", "body"}`: the answer to the `Query` with that id, as JSON |
+
+Tags 4 and 16 are kept for change notifications to `salash mcp` (`Subscribe`, `Changed`),
+which don't exist yet.
 
 A client and a server from different builds (salash upgraded while a server ran) can meet. The
 client checks `VERSION` in `Welcome`, and a server from before there was one sends a single
@@ -129,7 +145,7 @@ from before versions sends tag 1, which a newer server rejects, closing the conn
   the `window-size` option, and shares between users with `-S` and `server-access`. One
   difference: a tmux client passes its terminal's file descriptors to the server, which then
   writes to your tty directly. salash streams the rendered bytes over the socket instead, which
-  fits crossterm and ratatui, and works the same on Windows named pipes.
+  fits crossterm and ratatui.
 - **zellij** ([zellij-org/zellij](https://github.com/zellij-org/zellij)) is closest in how it
   is built: it starts its server by running its own binary again, sends serialized messages
   over IPC (`zellij-utils/src/ipc.rs`), the server renders, and clients print. Its
@@ -138,7 +154,21 @@ from before versions sends tag 1, which a newer server rejects, closing the conn
 - **dtach** ([crigler/dtach](https://github.com/crigler/dtach)) and **abduco**
   ([martanne/abduco](https://github.com/martanne/abduco)) do detach and nothing else.
 - Crates and std: [`interprocess`](https://github.com/kotauskas/interprocess) for local
-  sockets (Unix domain sockets, Windows named pipes), crossterm's `serde` feature so events can
+  sockets (Unix domain sockets), crossterm's `serde` feature so events can
   cross the socket, and std `File::try_lock`. The [`daemonize`](https://github.com/knsd/daemonize)
   crate forks, which is why it isn't used.
 - The folder that ignores itself is borrowed from pytest's `.pytest_cache/.gitignore`.
+- `salash mcp` follows **tmux control mode** ([wiki](https://github.com/tmux/tmux/wiki/Control-Mode)):
+  a client that gets state as text instead of a drawn screen. `read_screen` is
+  `capture-pane -p` (plain text, `-S` for history), and `list_tabs` is `list-panes -F`. The MCP
+  side is the official Rust SDK, [`rmcp`](https://github.com/modelcontextprotocol/rust-sdk),
+  with tokio only inside the `salash mcp` process. It handles both protocol generations Claude
+  Code speaks: `server/discover` (2026-07-28), then `initialize` (2025-11-25).
+- salash's skills are a [Claude Code plugin](https://code.claude.com/docs/en/plugins/manifest-reference.md)
+  embedded with `include_str!`, written out at startup and passed per session with
+  `--plugin-dir`, as `claude-hooks.json` is with `--settings`. Unlike the hooks, it is passed even
+  with `inject_hooks = false`, since `--plugin-dir` writes nothing into `~/.claude`.
+  Plugins installed into a global folder, as tmux's [TPM](https://github.com/tmux-plugins/tpm)
+  does with `~/.tmux/plugins`, are what this avoids: such a copy shows up everywhere and stays
+  behind when the program is upgraded. Example plugins:
+  [anthropics/claude-code/plugins](https://github.com/anthropics/claude-code/tree/main/plugins).

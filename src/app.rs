@@ -2,6 +2,7 @@ use crate::api::{self, Reply, Request};
 use crate::complete::{self, Completion};
 use crate::config::Config;
 use crate::keys;
+use crate::plugin;
 use crate::proto::ServerMsg;
 use crate::providers::{self, SyncReport};
 use crate::state::{self, IssueState, SortMode, State, TabKind, TabState};
@@ -49,7 +50,8 @@ impl Tab {
         Tab { st, pane: None, status: ClaudeStatus::Exited, status_ts: 0, seen_ts: 0, esc_ts: None, exit_check: None, first_args: vec![] }
     }
 
-    /// Status as shown: "Done" turns into "Idle" once you've looked at the tab.
+    /// Status as shown: "Done" turns into "Idle" once the tab has been on view
+    /// for `seen_after_secs`.
     pub fn shown_status(&self) -> ClaudeStatus {
         if self.status == ClaudeStatus::Done && self.status_ts <= self.seen_ts {
             ClaudeStatus::Idle
@@ -161,11 +163,28 @@ fn scratch_shown(tabs: usize, selected: bool) -> bool {
     tabs > 0 || selected
 }
 
+/// Track the tab on view. True once the same tab has been on view for `after`.
+fn dwell(on_view: &mut Option<(String, Instant)>, tab: Option<&str>, now: Instant, after: Duration) -> bool {
+    match (on_view.as_ref(), tab) {
+        (_, None) => {
+            *on_view = None;
+            false
+        }
+        (Some((id, since)), Some(t)) if id == t => now.saturating_duration_since(*since) >= after,
+        (_, Some(t)) => {
+            *on_view = Some((t.to_string(), now));
+            after.is_zero()
+        }
+    }
+}
+
 /// Where a tab that needs the issue's checkout starts.
 enum Workdir {
     Ready(PathBuf),
     /// The worktree is being created; the tab starts when it's done.
     Pending,
+    /// Worktrees are off: the repo itself.
+    Repo(PathBuf),
     NoRepo,
 }
 
@@ -202,7 +221,7 @@ impl IssueRt {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Focus {
     Sidebar,
     Terminal,
@@ -268,6 +287,10 @@ pub struct App {
     /// For the client whose input this is: what to copy or open on its side.
     pub outbox: Vec<ServerMsg>,
     hooks_settings: Option<PathBuf>,
+    /// The `--mcp-config` file Claude tabs get, unless `mcp = false`.
+    mcp_config: Option<PathBuf>,
+    /// salash's plugin (its skills), passed as `claude --plugin-dir`.
+    plugin_dir: Option<PathBuf>,
     bell_pending: bool,
     // Hit areas from the last draw.
     pub term_rect: Rect,
@@ -284,6 +307,13 @@ pub struct App {
     last_scan: Instant,
     last_status: Instant,
     last_spin: Instant,
+    /// The tab on view and since when: it counts as seen after
+    /// `seen_after_secs`. One for everyone while all clients share one view.
+    /// Monotonic, so a clock step or sleep doesn't mark it seen.
+    on_view: Option<(String, Instant)>,
+    /// The selected issue and since when (ms, like `seen_ts`): a Done seen
+    /// meanwhile keeps its rank, so the list doesn't reorder under the cursor.
+    held: Option<(String, i64)>,
 }
 
 fn now_ms() -> i64 {
@@ -300,6 +330,40 @@ fn home() -> PathBuf {
     dirs::home_dir().unwrap_or_else(|| PathBuf::from("."))
 }
 
+/// Claude's argv: the configured command, salash's hooks settings, plugin and
+/// MCP config when given, then `--resume <session>` or, on a first launch, `first_args`.
+fn claude_argv(
+    cmd: &[String],
+    settings: Option<&Path>,
+    plugin: Option<&Path>,
+    mcp: Option<&Path>,
+    session: Option<&str>,
+    first_args: Vec<String>,
+) -> Vec<String> {
+    let mut v = cmd.to_vec();
+    if let Some(s) = settings {
+        v.push("--settings".into());
+        v.push(s.to_string_lossy().into_owned());
+    }
+    if let Some(p) = plugin {
+        v.push("--plugin-dir".into());
+        v.push(p.to_string_lossy().into_owned());
+    }
+    // One argument: `--mcp-config` takes several values, so a separate path
+    // would take a first prompt after it as another.
+    if let Some(m) = mcp {
+        v.push(format!("--mcp-config={}", m.display()));
+    }
+    match session {
+        Some(sid) => {
+            v.push("--resume".into());
+            v.push(sid.into());
+        }
+        None => v.extend(first_args),
+    }
+    v
+}
+
 /// The saved default directory if it still exists, otherwise salash's folder.
 fn usable_default(saved: Option<&Path>, folder: &Path) -> PathBuf {
     saved.filter(|p| p.is_dir()).unwrap_or(folder).to_path_buf()
@@ -311,8 +375,42 @@ impl App {
         let notes = vault.scan();
         let state = State::load();
         let hooks_settings = if cfg.inject_hooks { status::write_settings_file().ok() } else { None };
+        let mcp_config = if cfg.mcp { status::write_mcp_file(&folder).ok() } else { None };
+        // Not tied to inject_hooks: --plugin-dir leaves ~/.claude alone.
+        let plugin_dir = crate::config::data_dir().join("plugin");
+        let plugin_dir = match plugin::write_to(&plugin_dir) {
+            Ok(()) => Some(plugin_dir),
+            Err(e) => {
+                eprintln!("writing salash's Claude plugin: {e:#}");
+                None
+            }
+        };
+        let mut app = App::with_parts(cfg, folder, vault, notes, state, hooks_settings, mcp_config, plugin_dir);
+        if let Some(n) = app.selected_note() {
+            app.view = n.stage;
+        } else if app.count(Stage::Active) == 0 {
+            app.view = Stage::Todo;
+        }
+        if app.selected.is_none() {
+            app.selected = app.rows().first().cloned();
+        }
+        if let Some(id) = app.selected.clone() {
+            app.rt_for(&id);
+        }
+        if first_run {
+            app.flash(format!("Created {} — set your vault and sources there", crate::config::config_path().display()));
+        } else if app.notes.is_empty() {
+            app.flash("No issues yet: n = new local issue, S = sync GitHub/Jira".into());
+        }
+        app.start_sync();
+        Ok(app)
+    }
+
+    /// The app over what `new` loaded, with no disk access and no sync.
+    #[allow(clippy::too_many_arguments)]
+    fn with_parts(cfg: Config, folder: PathBuf, vault: Vault, notes: Vec<Note>, state: State, hooks_settings: Option<PathBuf>, mcp_config: Option<PathBuf>, plugin_dir: Option<PathBuf>) -> App {
         let prefix = keys::parse_prefix(&cfg.prefix);
-        let mut app = App {
+        App {
             selected: state.selected.clone().filter(|id| {
                 notes.iter().any(|n| &n.id == id)
                     || (id == SCRATCH && state.issues.get(SCRATCH).is_some_and(|s| !s.tabs.is_empty()))
@@ -338,6 +436,8 @@ impl App {
             detach: false,
             outbox: vec![],
             hooks_settings,
+            mcp_config,
+            plugin_dir,
             bell_pending: false,
             term_rect: Rect::default(),
             sidebar_rect: Rect::default(),
@@ -351,25 +451,9 @@ impl App {
             last_scan: Instant::now(),
             last_status: Instant::now(),
             last_spin: Instant::now(),
-        };
-        if let Some(n) = app.selected_note() {
-            app.view = n.stage;
-        } else if app.count(Stage::Active) == 0 {
-            app.view = Stage::Todo;
+            on_view: None,
+            held: None,
         }
-        if app.selected.is_none() {
-            app.selected = app.rows().first().cloned();
-        }
-        if let Some(id) = app.selected.clone() {
-            app.rt_for(&id);
-        }
-        if first_run {
-            app.flash(format!("Created {} — set your vault and sources there", crate::config::config_path().display()));
-        } else if app.notes.is_empty() {
-            app.flash("No issues yet: n = new local issue, S = sync GitHub/Jira".into());
-        }
-        app.start_sync();
-        Ok(app)
     }
 
     pub fn flash(&mut self, s: String) {
@@ -415,11 +499,20 @@ impl App {
             Some(rt) => rt
                 .tabs
                 .iter()
-                .map(|t| activity(t.st.kind, t.running().then(|| t.shown_status())))
+                .map(|t| activity(t.st.kind, t.running().then(|| self.ranked_status(id, t))))
                 .max(),
             None => self.state.issues.get(id).and_then(|s| s.tabs.iter().map(|t| activity(t.kind, None)).max()),
         }
         .unwrap_or(0)
+    }
+
+    /// Status a tab ranks by in the activity sort: as shown, except that a
+    /// Done seen while its issue stayed selected still ranks as Done.
+    fn ranked_status(&self, id: &str, t: &Tab) -> ClaudeStatus {
+        match &self.held {
+            Some((h, since)) if h == id && t.status == ClaudeStatus::Done && t.seen_ts >= *since => ClaudeStatus::Done,
+            _ => t.shown_status(),
+        }
     }
 
     /// Scratch shows while it has tabs, or while it's selected so a first tab can be opened.
@@ -654,6 +747,9 @@ impl App {
             .clone()
             .or_else(|| self.cfg.repo_path_for(&note.source, note.repo.as_deref()));
         let Some(repo) = repo else { return Workdir::NoRepo };
+        if !self.cfg.worktrees_for(&note.source, note.repo.as_deref()) {
+            return Workdir::Repo(repo);
+        }
         let command = self.cfg.worktree_command.clone();
         let dir = self.cfg.worktrees_dir.clone();
         let (stem, issue) = (note.stem(), note.id.clone());
@@ -737,6 +833,15 @@ impl App {
             None => match note.as_ref().map_or(Workdir::NoRepo, |n| self.workdir(n, &tab_id)) {
                 Workdir::Ready(p) => p,
                 Workdir::Pending => return,
+                // Kept in the tab, so it resumes here even once worktrees are back on.
+                // No home fallback as in settle_dir: a session on an issue with a repo
+                // started in the repo or in its worktree, and that is returned first.
+                Workdir::Repo(repo) => {
+                    let Some(tab) = self.rt_for(id).tabs.get_mut(idx) else { return };
+                    let dir = tab.st.cwd.get_or_insert(repo).clone();
+                    self.persist(id);
+                    dir
+                }
                 Workdir::NoRepo => {
                     let default = self.default_dir();
                     let Some(tab) = self.rt_for(id).tabs.get_mut(idx) else { return };
@@ -758,20 +863,14 @@ impl App {
         let st = tab.st.clone();
         let first_args = std::mem::take(&mut tab.first_args);
         let argv: Vec<String> = match st.kind {
-            TabKind::Claude => {
-                let mut v = self.cfg.claude_command.clone();
-                if let Some(s) = &self.hooks_settings {
-                    v.push("--settings".into());
-                    v.push(s.to_string_lossy().into_owned());
-                }
-                if let Some(sid) = &st.claude_session {
-                    v.push("--resume".into());
-                    v.push(sid.clone());
-                } else {
-                    v.extend(first_args);
-                }
-                v
-            }
+            TabKind::Claude => claude_argv(
+                &self.cfg.claude_command,
+                self.hooks_settings.as_deref(),
+                self.plugin_dir.as_deref(),
+                self.mcp_config.as_deref(),
+                st.claude_session.as_deref(),
+                first_args,
+            ),
             TabKind::Shell => self.cfg.shell(),
             TabKind::Notes => {
                 let Some(note) = note else { return };
@@ -875,7 +974,7 @@ impl App {
         }
     }
 
-    fn open_requested(&mut self, req: Request) -> Reply {
+    pub fn open_requested(&mut self, req: Request) -> Reply {
         if let Err(e) = req.check() {
             return Reply::err(format!("{e:#}"));
         }
@@ -1140,10 +1239,30 @@ impl App {
         self.viewer = Snapshot::load(&state::snapshot_path(&tab), rows).map(|s| (tab, s));
     }
 
+    fn active_tab_mut(&mut self) -> Option<&mut Tab> {
+        let rt = self.rt.get_mut(self.selected.as_ref()?)?;
+        rt.tabs.get_mut(rt.active)
+    }
+
     fn active_pane_mut(&mut self) -> Option<&mut Pane> {
-        let id = self.selected.clone()?;
-        let rt = self.rt.get_mut(&id)?;
-        rt.tabs.get_mut(rt.active)?.pane.as_mut()
+        self.active_tab_mut()?.pane.as_mut()
+    }
+
+    /// Mark the tab on view as seen once it has stayed on view for
+    /// `seen_after_secs`, so flicking past a finished tab doesn't count as
+    /// reading it. Switching issue or tab changes the id on view, which
+    /// restarts the timer; so does an overlay covering the pane.
+    fn mark_seen(&mut self, now: Instant) {
+        if self.held.as_ref().map(|(id, _)| id) != self.selected.as_ref() {
+            self.held = self.selected.clone().map(|id| (id, now_ms()));
+        }
+        let covered = !matches!(self.mode, Mode::Normal | Mode::Prefix);
+        let tab = if covered { None } else { self.active_tab().map(|t| t.st.id.clone()) };
+        if dwell(&mut self.on_view, tab.as_deref(), now, Duration::from_secs(self.cfg.seen_after_secs)) {
+            if let Some(t) = self.active_tab_mut() {
+                t.seen_ts = now_ms();
+            }
+        }
     }
 
     // ---------- periodic work ----------
@@ -1166,15 +1285,8 @@ impl App {
             }
         }
 
-        // Mark the visible tab as seen.
+        self.mark_seen(Instant::now());
         let now = now_ms();
-        if let Some(id) = self.selected.clone() {
-            if let Some(rt) = self.rt.get_mut(&id) {
-                if let Some(t) = rt.tabs.get_mut(rt.active) {
-                    t.seen_ts = now;
-                }
-            }
-        }
 
         if self.last_status.elapsed() < Duration::from_millis(250) {
             return;
@@ -1311,6 +1423,9 @@ impl App {
             return;
         }
         if self.focus == Focus::Terminal {
+            if let Some(t) = self.active_tab_mut().filter(|t| t.pane.is_some()) {
+                t.seen_ts = now_ms();
+            }
             if let Some(p) = self.active_pane_mut() {
                 if p.bracketed_paste() {
                     let mut b = b"\x1b[200~".to_vec();
@@ -1429,8 +1544,9 @@ impl App {
                     self.set_view(s);
                     self.focus = Focus::Sidebar;
                 } else if let Some((_, id)) = self.item_hits.iter().find(|(r, _)| r.contains(pos)).cloned() {
+                    // Unlike ⏎, a click never starts, restarts or resumes a tab.
                     self.select_id(id);
-                    self.focus = Focus::Sidebar;
+                    self.focus_tab_if_live();
                 } else if self.term_rect.contains(pos) {
                     if self.can_focus_terminal() {
                         self.focus = Focus::Terminal;
@@ -1470,6 +1586,7 @@ impl App {
                     }
                 } else if self.sidebar_rect.contains(pos) {
                     self.move_selection(if up { -1 } else { 1 });
+                    self.after_issue_switch();
                 }
             }
             _ => {}
@@ -1575,6 +1692,8 @@ impl App {
                 let bytes = keys::encode(&k, p.application_cursor());
                 if !bytes.is_empty() {
                     p.write(&bytes);
+                    // Typing into the tab means you've read it.
+                    tab.seen_ts = now_ms();
                 }
             }
             _ => {
@@ -1675,7 +1794,7 @@ impl App {
             }
             KeyCode::Char('`') => {
                 self.select_id(SCRATCH.into());
-                self.focus = if self.can_focus_terminal() { Focus::Terminal } else { Focus::Sidebar };
+                self.focus_tab_if_live();
             }
             KeyCode::Char('q') => self.mode = Mode::Confirm(ConfirmKind::Quit),
             KeyCode::Char('D') => self.detach = true,
@@ -1733,8 +1852,14 @@ impl App {
         }
     }
 
-    /// When jumping issues from the terminal, stay in the terminal if the
-    /// target issue already has a running tab.
+    /// Focus the active tab if it has a pane (running or exited) or a saved
+    /// screen, else the sidebar. Never starts, restarts or resumes anything.
+    fn focus_tab_if_live(&mut self) {
+        self.focus = if self.can_focus_terminal() { Focus::Terminal } else { Focus::Sidebar };
+    }
+
+    /// When moving between issues from the terminal (prefix `j`/`k`, the
+    /// sidebar wheel), stay in the terminal only if the target's tab is live.
     fn after_issue_switch(&mut self) {
         if self.focus == Focus::Terminal && !self.can_focus_terminal() {
             self.focus = Focus::Sidebar;
@@ -1792,6 +1917,41 @@ mod tests {
         Tab { status, status_ts, esc_ts, ..Tab::new(st) }
     }
 
+    fn strs(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn claude_gets_hooks_plugin_and_mcp_before_its_own_args() {
+        let (s, p, m) = (Path::new("/d/claude-hooks.json"), Path::new("/d/plugin"), Path::new("/d/claude-mcp.json"));
+        let first = claude_argv(&strs(&["claude"]), Some(s), Some(p), Some(m), None, strs(&["--permission-mode", "plan", "brief"]));
+        assert_eq!(
+            first,
+            strs(&[
+                "claude",
+                "--settings",
+                "/d/claude-hooks.json",
+                "--plugin-dir",
+                "/d/plugin",
+                "--mcp-config=/d/claude-mcp.json",
+                "--permission-mode",
+                "plan",
+                "brief"
+            ])
+        );
+        let resumed = claude_argv(&strs(&["claude"]), Some(s), Some(p), Some(m), Some("sid"), strs(&["ignored"]));
+        assert_eq!(
+            resumed,
+            strs(&["claude", "--settings", "/d/claude-hooks.json", "--plugin-dir", "/d/plugin", "--mcp-config=/d/claude-mcp.json", "--resume", "sid"])
+        );
+    }
+
+    #[test]
+    fn without_injection_claude_gets_neither() {
+        let v = claude_argv(&strs(&["npx", "claude"]), None, None, None, Some("sid"), vec![]);
+        assert_eq!(v, strs(&["npx", "claude", "--resume", "sid"]));
+    }
+
     #[test]
     fn resolve_dir_accepts_only_directories() {
         let dir = std::env::temp_dir().join(format!("salash-test-{}", uuid::Uuid::new_v4()));
@@ -1828,6 +1988,164 @@ mod tests {
         assert!(t.suspended());
         t.st.kind = TabKind::Shell;
         assert!(!t.suspended());
+    }
+
+    #[test]
+    fn a_done_tab_reads_as_idle_only_once_seen() {
+        let mut t = tab(ClaudeStatus::Done, 1000, None);
+        assert_eq!(t.shown_status(), ClaudeStatus::Done);
+        t.seen_ts = 999;
+        assert_eq!(t.shown_status(), ClaudeStatus::Done);
+        t.seen_ts = 1000;
+        assert_eq!(t.shown_status(), ClaudeStatus::Idle);
+        let mut w = tab(ClaudeStatus::Working, 1000, None);
+        w.seen_ts = 5000;
+        assert_eq!(w.shown_status(), ClaudeStatus::Working);
+    }
+
+    #[test]
+    fn a_tab_counts_as_seen_after_staying_on_view() {
+        let t0 = Instant::now();
+        let at = |ms: u64| t0 + Duration::from_millis(ms);
+        let after = Duration::from_secs(5);
+        let mut v = None;
+        assert!(!dwell(&mut v, Some("a"), at(0), after));
+        assert!(!dwell(&mut v, Some("a"), at(4999), after));
+        assert!(dwell(&mut v, Some("a"), at(5000), after));
+        // Another tab, then back: the timer starts again.
+        assert!(!dwell(&mut v, Some("b"), at(6000), after));
+        assert!(!dwell(&mut v, Some("a"), at(7000), after));
+        assert!(!dwell(&mut v, Some("a"), at(11999), after));
+        assert!(dwell(&mut v, Some("a"), at(12000), after));
+        // Nothing on view resets it too.
+        assert!(!dwell(&mut v, None, at(12500), after));
+        assert!(!dwell(&mut v, Some("a"), at(13000), after));
+        // A zero delay counts at once.
+        assert!(dwell(&mut None, Some("a"), at(0), Duration::ZERO));
+    }
+
+    fn note(id: &str) -> Note {
+        Note {
+            id: id.into(),
+            title: id.into(),
+            stage: Stage::Active,
+            path: PathBuf::new(),
+            source: "local".into(),
+            url: None,
+            repo: None,
+            repo_path: None,
+            created: None,
+            moved: None,
+        }
+    }
+
+    /// Issues "a" and "b", each with Done tabs named by `tabs`, "a" selected.
+    /// Built in memory: no vault, state file or sync.
+    fn app(tabs: &[(&str, &[&str])]) -> App {
+        let notes = tabs.iter().map(|(id, _)| note(id)).collect();
+        let vault = Vault { root: PathBuf::from("/nonexistent") };
+        let mut app = App::with_parts(Config::default(), PathBuf::from("/"), vault, notes, State::default(), None, None, None);
+        for (id, ids) in tabs {
+            let tabs = ids
+                .iter()
+                .map(|t| {
+                    let mut tab = tab(ClaudeStatus::Done, 1, None);
+                    tab.st.id = (*t).into();
+                    tab
+                })
+                .collect();
+            app.rt.insert((*id).into(), IssueRt { tabs, ..Default::default() });
+        }
+        app.selected = Some(tabs[0].0.into());
+        app
+    }
+
+    fn shown(app: &App, issue: &str, idx: usize) -> ClaudeStatus {
+        app.rt[issue].tabs[idx].shown_status()
+    }
+
+    #[test]
+    fn flicking_past_an_issue_keeps_its_done_unread() {
+        let mut app = app(&[("a", &["a1"]), ("b", &["b1"])]);
+        let t0 = Instant::now();
+        let at = |s: u64| t0 + Duration::from_secs(s);
+        app.mark_seen(at(0));
+        app.mark_seen(at(3));
+        app.selected = Some("b".into());
+        app.mark_seen(at(4));
+        assert_eq!(shown(&app, "a", 0), ClaudeStatus::Done);
+        // Back on "a": the timer starts again from there.
+        app.selected = Some("a".into());
+        app.mark_seen(at(5));
+        app.mark_seen(at(9));
+        assert_eq!(shown(&app, "a", 0), ClaudeStatus::Done);
+        app.mark_seen(at(10));
+        assert_eq!(shown(&app, "a", 0), ClaudeStatus::Idle);
+        assert_eq!(shown(&app, "b", 0), ClaudeStatus::Done);
+    }
+
+    #[test]
+    fn switching_tab_restarts_the_timer_and_marks_the_tab_on_view() {
+        let mut app = app(&[("a", &["a1", "a2"])]);
+        let t0 = Instant::now();
+        let at = |s: u64| t0 + Duration::from_secs(s);
+        app.mark_seen(at(0));
+        app.rt.get_mut("a").unwrap().active = 1;
+        app.mark_seen(at(4));
+        app.mark_seen(at(8));
+        assert_eq!(shown(&app, "a", 1), ClaudeStatus::Done);
+        app.mark_seen(at(9));
+        assert_eq!(shown(&app, "a", 0), ClaudeStatus::Done);
+        assert_eq!(shown(&app, "a", 1), ClaudeStatus::Idle);
+    }
+
+    #[test]
+    fn no_tab_on_view_clears_the_timer() {
+        let mut app = app(&[("a", &["a1"])]);
+        app.mark_seen(Instant::now());
+        assert!(app.on_view.is_some());
+        app.rt.get_mut("a").unwrap().tabs.clear();
+        app.mark_seen(Instant::now());
+        assert!(app.on_view.is_none());
+    }
+
+    #[test]
+    fn a_zero_delay_marks_the_tab_seen_at_once() {
+        let mut app = app(&[("a", &["a1"])]);
+        app.cfg.seen_after_secs = 0;
+        app.mark_seen(Instant::now());
+        assert_eq!(shown(&app, "a", 0), ClaudeStatus::Idle);
+    }
+
+    #[test]
+    fn an_overlay_hides_the_tab() {
+        let mut app = app(&[("a", &["a1"])]);
+        let t0 = Instant::now();
+        app.mode = Mode::Help;
+        app.mark_seen(t0);
+        app.mark_seen(t0 + Duration::from_secs(10));
+        assert_eq!(shown(&app, "a", 0), ClaudeStatus::Done);
+        // Closing it starts the timer.
+        app.mode = Mode::Normal;
+        app.mark_seen(t0 + Duration::from_secs(11));
+        app.mark_seen(t0 + Duration::from_secs(16));
+        assert_eq!(shown(&app, "a", 0), ClaudeStatus::Idle);
+    }
+
+    #[test]
+    fn a_done_seen_while_selected_keeps_its_rank_until_you_move() {
+        let mut app = app(&[("a", &["a1"]), ("b", &["b1"])]);
+        let t0 = Instant::now();
+        app.mark_seen(t0);
+        app.mark_seen(t0 + Duration::from_secs(5));
+        let a1 = |app: &App| app.ranked_status("a", &app.rt["a"].tabs[0]);
+        assert_eq!(shown(&app, "a", 0), ClaudeStatus::Idle);
+        assert_eq!(a1(&app), ClaudeStatus::Done);
+        app.selected = Some("b".into());
+        app.mark_seen(t0 + Duration::from_secs(6));
+        assert_eq!(a1(&app), ClaudeStatus::Idle);
+        // "b" was only flicked past: it ranks as Done.
+        assert_eq!(app.ranked_status("b", &app.rt["b"].tabs[0]), ClaudeStatus::Done);
     }
 
     #[test]
@@ -1910,5 +2228,308 @@ mod tests {
         assert_eq!(activity(TabKind::Claude, None), idle);
         assert_eq!(activity(TabKind::Claude, Some(Exited)), idle);
         assert_eq!(level(&[(TabKind::Notes, None)]), 0);
+    }
+
+    /// Never run on a click: if one ever spawned, it would not be Claude.
+    const MUST_NOT_SPAWN: &str = "/nonexistent/salash-test-must-not-spawn";
+
+    /// A vault dir removed on drop, even when an assertion fails first.
+    struct TempVault(PathBuf);
+
+    impl Drop for TempVault {
+        fn drop(&mut self) {
+            std::fs::remove_dir_all(&self.0).ok();
+        }
+    }
+
+    /// A real App over a fresh vault holding `issues` in Active. Keep the
+    /// returned guard alive for as long as the App.
+    fn click_app(issues: &[&str]) -> (App, TempVault) {
+        // The data dir (state.json, snapshots, status files) is set once per
+        // test binary. A fixed dir under target/ keeps it away from the real
+        // instance without leaking a new dir into /tmp on every run. Tests
+        // share it, so they assert on in-memory state only.
+        crate::config::set_data_dir(Path::new(env!("CARGO_MANIFEST_DIR")).join("target/salash-unit-data"));
+        let vault = TempVault(std::env::temp_dir().join(format!("salash-test-{}", uuid::Uuid::new_v4())));
+        let cfg = Config {
+            vault: vault.0.clone(),
+            inject_hooks: false,
+            claude_command: vec![MUST_NOT_SPAWN.into()],
+            shell_command: vec![MUST_NOT_SPAWN.into()],
+            ..Default::default()
+        };
+        let mut app = App::new(cfg, false, vault.0.clone()).unwrap();
+        // Another test may have saved state in the shared dir; start clean.
+        app.state = State::default();
+        app.rt.clear();
+        for id in issues {
+            let note = NewNote { id, title: id, source: "local", url: None, repo: None, stage: Stage::Active };
+            app.vault.create(note).unwrap();
+        }
+        app.rescan();
+        app.view = Stage::Active;
+        app.selected = None;
+        app.msg = None;
+        (app, vault)
+    }
+
+    fn with_tabs(app: &mut App, id: &str, tabs: Vec<Tab>, active: usize) {
+        app.rt.insert(id.to_string(), IssueRt { tabs, active, ..Default::default() });
+    }
+
+    /// A Claude tab with no pane and no session: never started.
+    fn unstarted_tab() -> Tab {
+        tab(ClaudeStatus::Exited, 0, None)
+    }
+
+    fn suspended_tab() -> Tab {
+        let mut t = unstarted_tab();
+        t.st.claude_session = Some("s".into());
+        t
+    }
+
+    /// A tab whose pane runs `sleep`; dropping the pane kills it.
+    fn running_tab(dir: &Path) -> Tab {
+        let argv = ["sh".to_string(), "-c".to_string(), "sleep 30".to_string()];
+        let mut t = unstarted_tab();
+        t.pane = Some(Pane::spawn(&argv, dir, &[], 5, 40).unwrap());
+        t
+    }
+
+    /// Nothing tried to spawn: a failed spawn would leave `pane == None` but flash.
+    fn assert_no_spawn(app: &App) {
+        assert!(app.msg.is_none(), "unexpected flash: {:?}", app.msg.as_ref().map(|m| &m.0));
+    }
+
+    /// Lay the screen out so the mouse hit rects are where the real UI draws them.
+    fn draw(app: &mut App) {
+        let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 30)).unwrap();
+        term.draw(|f| crate::ui::draw(app, f)).unwrap();
+    }
+
+    fn mouse(app: &mut App, kind: MouseEventKind, pos: Position) {
+        app.handle(Event::Mouse(MouseEvent { kind, column: pos.x, row: pos.y, modifiers: KeyModifiers::NONE }));
+    }
+
+    /// Left-click the issue's row.
+    fn click(app: &mut App, id: &str) {
+        draw(app);
+        let r = app.item_hits.iter().find(|(_, i)| i == id).map(|(r, _)| *r).expect("issue row drawn");
+        mouse(app, MouseEventKind::Down(MouseButton::Left), Position::new(r.x, r.y));
+    }
+
+    /// Scroll the wheel down once over the sidebar's issue list.
+    fn wheel_down_sidebar(app: &mut App) {
+        draw(app);
+        let pos = app.item_hits.first().expect("issue row drawn").0;
+        let pos = Position::new(pos.x, pos.y);
+        mouse(app, MouseEventKind::ScrollDown, pos);
+    }
+
+    #[test]
+    fn clicking_an_issue_focuses_its_last_active_tab() {
+        let (mut app, vault) = click_app(&["a"]);
+        with_tabs(&mut app, "a", vec![unstarted_tab(), running_tab(&vault.0)], 1);
+
+        click(&mut app, "a");
+        assert_eq!(app.selected.as_deref(), Some("a"));
+        assert_eq!(app.focus, Focus::Terminal);
+        assert_eq!(app.rt["a"].active, 1);
+        assert!(app.rt["a"].tabs[0].pane.is_none());
+        assert_no_spawn(&app);
+
+        // Clicking the issue that is already selected also jumps into its tab.
+        app.focus = Focus::Sidebar;
+        click(&mut app, "a");
+        assert_eq!(app.selected.as_deref(), Some("a"));
+        assert_eq!(app.focus, Focus::Terminal);
+        assert_no_spawn(&app);
+    }
+
+    #[test]
+    fn clicking_an_issue_shows_a_suspended_tab_without_resuming_it() {
+        let (mut app, _vault) = click_app(&["a"]);
+        with_tabs(&mut app, "a", vec![suspended_tab()], 0);
+
+        click(&mut app, "a");
+        assert_eq!(app.focus, Focus::Terminal);
+        let rt = &app.rt["a"];
+        assert_eq!(rt.tabs.len(), 1);
+        assert!(rt.tabs[0].pane.is_none() && rt.tabs[0].suspended());
+        assert_no_spawn(&app);
+    }
+
+    #[test]
+    fn clicking_an_issue_shows_an_exited_tab_without_restarting_it() {
+        let (mut app, vault) = click_app(&["a"]);
+        let mut exited = running_tab(&vault.0);
+        exited.pane.as_mut().unwrap().exited = Some(1);
+        with_tabs(&mut app, "a", vec![exited], 0);
+
+        click(&mut app, "a");
+        assert_eq!(app.focus, Focus::Terminal);
+        let rt = &app.rt["a"];
+        assert_eq!(rt.tabs.len(), 1);
+        assert_eq!(rt.tabs[0].pane.as_ref().and_then(|p| p.exited), Some(1));
+        assert_no_spawn(&app);
+    }
+
+    #[test]
+    fn clicking_an_issue_without_a_live_tab_stays_in_the_sidebar() {
+        let (mut app, _vault) = click_app(&["empty", "unstarted"]);
+        with_tabs(&mut app, "unstarted", vec![unstarted_tab()], 0);
+
+        click(&mut app, "empty");
+        assert_eq!(app.selected.as_deref(), Some("empty"));
+        assert_eq!(app.focus, Focus::Sidebar);
+        assert!(app.rt["empty"].tabs.is_empty() && app.rt["empty"].worktree.is_none());
+
+        click(&mut app, "unstarted");
+        assert_eq!(app.selected.as_deref(), Some("unstarted"));
+        assert_eq!(app.focus, Focus::Sidebar);
+        assert!(app.rt["unstarted"].tabs[0].pane.is_none());
+        assert_no_spawn(&app);
+    }
+
+    #[test]
+    fn moving_from_a_tab_to_an_issue_without_a_live_tab_focuses_the_sidebar() {
+        // The sidebar wheel and prefix j both leave a focused tab for the next issue.
+        let moves: [fn(&mut App); 2] = [wheel_down_sidebar, |app| {
+            let (code, mods) = app.prefix;
+            app.handle(Event::Key(KeyEvent::new(code, mods)));
+            app.handle(Event::Key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE)));
+        }];
+        for move_down in moves {
+            let (mut app, _vault) = click_app(&["a", "b", "c"]);
+            with_tabs(&mut app, "a", vec![suspended_tab()], 0);
+            with_tabs(&mut app, "b", vec![suspended_tab()], 0);
+            with_tabs(&mut app, "c", vec![unstarted_tab()], 0);
+            click(&mut app, "a");
+            assert_eq!(app.focus, Focus::Terminal);
+
+            // A suspended tab is live: stay in the terminal.
+            move_down(&mut app);
+            assert_eq!(app.selected.as_deref(), Some("b"));
+            assert_eq!(app.focus, Focus::Terminal);
+
+            // An unstarted tab is not: back to the sidebar.
+            move_down(&mut app);
+            assert_eq!(app.selected.as_deref(), Some("c"));
+            assert_eq!(app.focus, Focus::Sidebar);
+            assert!(app.rt.values().flat_map(|rt| &rt.tabs).all(|t| t.pane.is_none()));
+            assert_no_spawn(&app);
+        }
+    }
+
+    fn temp_dir() -> PathBuf {
+        let d = std::env::temp_dir().join(format!("salash-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    /// One issue "a" with a Claude tab "t" that has no directory yet. State is saved to a
+    /// temp dir, never to the `$SALASH_DATA` of the salash these tests may run in.
+    fn worktree_app(cfg: Config, note: Note) -> App {
+        crate::config::set_data_dir(std::env::temp_dir().join(format!("salash-test-data-{}", std::process::id())));
+        let vault = Vault { root: PathBuf::from("/nonexistent") };
+        let mut app = App::with_parts(cfg, PathBuf::from("/"), vault, vec![note], State::default(), None, None, None);
+        let mut t = tab(ClaudeStatus::Idle, 0, None);
+        t.st.id = "t".into();
+        app.rt.insert("a".into(), IssueRt { tabs: vec![t], ..Default::default() });
+        app
+    }
+
+    fn github_note(repo: &str) -> Note {
+        Note { source: "github".into(), repo: Some(repo.into()), ..note("a") }
+    }
+
+    fn workdir_of(app: &mut App) -> Workdir {
+        let n = app.notes[0].clone();
+        app.workdir(&n, "t")
+    }
+
+    #[test]
+    fn with_worktrees_off_a_tab_starts_in_the_repo() {
+        let repo = temp_dir();
+        let cfg = Config { worktrees: false, local_repo: Some(repo.clone()), ..Config::default() };
+        let mut app = worktree_app(cfg, note("a"));
+        assert!(matches!(workdir_of(&mut app), Workdir::Repo(p) if p == repo));
+        assert!(app.rt["a"].creating.is_none());
+        std::fs::remove_dir_all(repo).ok();
+    }
+
+    #[test]
+    fn with_worktrees_off_the_notes_repo_path_wins() {
+        let (local, own) = (temp_dir(), temp_dir());
+        let cfg = Config { worktrees: false, local_repo: Some(local.clone()), ..Config::default() };
+        let mut app = worktree_app(cfg, Note { repo_path: Some(own.clone()), ..note("a") });
+        assert!(matches!(workdir_of(&mut app), Workdir::Repo(p) if p == own));
+        std::fs::remove_dir_all(local).ok();
+        std::fs::remove_dir_all(own).ok();
+    }
+
+    #[test]
+    fn with_worktrees_off_an_issue_with_no_repo_still_has_none() {
+        let cfg = Config { worktrees: false, ..Config::default() };
+        let mut app = worktree_app(cfg, note("a"));
+        assert!(matches!(workdir_of(&mut app), Workdir::NoRepo));
+    }
+
+    #[test]
+    fn a_source_can_turn_worktrees_off_for_its_issues_only() {
+        let repo = temp_dir();
+        let cfg: Config = toml::from_str(&format!(
+            r#"
+            [[github]]
+            repo = "a/off"
+            path = "{0}"
+            worktrees = false
+            [[github]]
+            repo = "a/on"
+            path = "{0}"
+            "#,
+            repo.display()
+        ))
+        .unwrap();
+        let mut off = worktree_app(cfg.clone(), github_note("a/off"));
+        assert!(matches!(workdir_of(&mut off), Workdir::Repo(p) if p == repo));
+        // Not a git repo, so the worktree the other source asks for fails in the background.
+        let mut on = worktree_app(cfg, github_note("a/on"));
+        assert!(matches!(workdir_of(&mut on), Workdir::Pending));
+        assert!(on.rt["a"].creating.is_some());
+    }
+
+    #[test]
+    fn a_worktree_made_before_keeps_being_used_with_worktrees_off() {
+        let (repo, wt) = (temp_dir(), temp_dir());
+        let cfg = Config { worktrees: false, local_repo: Some(repo.clone()), ..Config::default() };
+        let mut app = worktree_app(cfg, note("a"));
+        app.rt.get_mut("a").unwrap().worktree = Some(wt.clone());
+        assert!(matches!(workdir_of(&mut app), Workdir::Ready(p) if p == wt));
+        std::fs::remove_dir_all(repo).ok();
+        std::fs::remove_dir_all(wt).ok();
+    }
+
+    #[test]
+    fn a_tab_started_in_the_repo_keeps_it_for_resume() {
+        let repo = temp_dir();
+        let cfg = Config {
+            worktrees: false,
+            local_repo: Some(repo.clone()),
+            claude_command: vec!["/nonexistent/claude".into()],
+            ..Config::default()
+        };
+        let mut app = worktree_app(cfg, note("a"));
+        app.spawn_pane("a", 0);
+        assert_eq!(app.rt["a"].tabs[0].st.cwd.as_deref(), Some(repo.as_path()));
+        // Saved before the process starts, so a resume after turning worktrees on finds it.
+        assert_eq!(app.state.issues["a"].tabs[0].cwd.as_deref(), Some(repo.as_path()));
+        app.cfg.worktrees = true;
+        assert!(matches!(workdir_of(&mut app), Workdir::Pending));
+        let mut again = worktree_app(app.cfg.clone(), note("a"));
+        again.rt.get_mut("a").unwrap().tabs[0].st.cwd = app.state.issues["a"].tabs[0].cwd.clone();
+        again.spawn_pane("a", 0);
+        assert!(again.rt["a"].creating.is_none(), "a tab with a directory never asks for a worktree");
+        std::fs::remove_dir_all(repo).ok();
     }
 }

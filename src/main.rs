@@ -7,8 +7,11 @@ mod complete;
 mod config;
 mod instance;
 mod keys;
+mod mcp;
+mod plugin;
 mod proto;
 mod providers;
+mod query;
 mod server;
 mod state;
 mod status;
@@ -70,8 +73,13 @@ enum Cmd {
         #[command(subcommand)]
         cmd: TabCmd,
     },
-    /// Install the /new-salash-tab Claude Code skill into ~/.claude/skills.
-    InstallSkill,
+    /// MCP server on stdio for Claude Code: issues, tabs, status and screens of
+    /// a running salash. Fails if none runs there; never starts one.
+    Mcp {
+        /// Folder of the salash; defaults to this tab's salash, else the
+        /// nearest folder above with a .salash.
+        folder: Option<PathBuf>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -82,7 +90,7 @@ enum TabCmd {
         #[arg(long)]
         issue: Option<String>,
         #[arg(long, value_enum, default_value = "claude")]
-        kind: TabKindArg,
+        kind: state::TabKind,
         /// Directory to start in; defaults to the issue's worktree.
         #[arg(long)]
         cwd: Option<std::path::PathBuf>,
@@ -102,14 +110,6 @@ enum TabCmd {
     },
 }
 
-#[derive(Clone, Copy, clap::ValueEnum)]
-enum TabKindArg {
-    Claude,
-    Shell,
-    Notes,
-}
-
-const SKILL: &str = include_str!("../skills/new-salash-tab/SKILL.md");
 
 /// The salash a command run here belongs to, if any. Its data dir applies
 /// from here on.
@@ -203,17 +203,10 @@ fn main() -> Result<()> {
             let issue = issue
                 .or_else(|| std::env::var("SALASH_ISSUE").ok())
                 .context("not inside a salash tab: pass --issue")?;
-            let cwd = cwd
-                .map(|d| std::fs::canonicalize(config::expand(&d)).with_context(|| format!("not a directory: {}", d.display())))
-                .transpose()?;
+            let cwd = cwd.as_deref().map(config::dir_arg).transpose()?;
             let prompt = prompt_file
                 .map(|f| std::fs::read_to_string(&f).with_context(|| format!("reading {}", f.display())))
                 .transpose()?;
-            let kind = match kind {
-                TabKindArg::Claude => state::TabKind::Claude,
-                TabKindArg::Shell => state::TabKind::Shell,
-                TabKindArg::Notes => state::TabKind::Notes,
-            };
             let req = api::Request { issue: issue.clone(), kind, cwd, name, mode, prompt };
             let reply = api::submit(&req)?;
             if !reply.ok {
@@ -222,13 +215,7 @@ fn main() -> Result<()> {
             println!("tab:{} issue:{issue}", reply.tab.unwrap_or_default());
             Ok(())
         }
-        Some(Cmd::InstallSkill) => {
-            let p = status::claude_dir().join("skills").join("new-salash-tab").join("SKILL.md");
-            std::fs::create_dir_all(p.parent().unwrap())?;
-            std::fs::write(&p, SKILL)?;
-            println!("Skill written to {}", p.display());
-            Ok(())
-        }
+        Some(Cmd::Mcp { folder }) => mcp::run(mcp::instance(folder)?),
         None => {
             let inst = Instance::new(cli.folder.as_deref())?;
             if cli.attach { client::attach(&inst) } else { client::start(&inst) }

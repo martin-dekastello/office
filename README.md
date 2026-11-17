@@ -23,7 +23,8 @@ The name comes from the Slovak word *salaš*, a shepherd's hut up in the mountai
   Scratch stays first in every view and sort while it has tabs, and hides again once it has none.
 - **Claude status on every tab and issue**, set by Claude Code hooks:
   `◐` yellow = working (animated) · `▲` amber = needs you (permission/question) ·
-  `●` green = finished while you weren't looking · `○` idle · `✕` exited · `–` suspended.
+  `●` green = finished and not seen yet (a tab counts as seen once it has been on view for
+  `seen_after_secs`, default 5) · `○` idle · `✕` exited · `–` suspended.
   The status of the most urgent tab also shows on the issue in the sidebar.
   The terminal bell rings when a background tab needs you.
 - **Notes live in Obsidian**: `<vault>/<notes_dir>/{todo,active,done,archive}/<id>-<slug>.md`,
@@ -40,7 +41,8 @@ The name comes from the Slovak word *salaš*, a shepherd's hut up in the mountai
 - **One git worktree + branch per issue** (`<worktrees_dir>/<repo>/<id>-<slug>`), so all
   tabs of an issue share one checkout. It's created when the issue's first Claude or shell tab
   opens, not before, so issues you never work on take no disk space. Bring your own script
-  with `worktree_command`.
+  with `worktree_command`, or set `worktrees = false` to manage checkouts yourself: tabs then
+  start in the issue's repo.
 - **Sessions can be stopped and picked up again.** Press `z` to suspend an inactive Claude
   tab: its process stops and its RAM is freed, but you can still scroll its saved screen,
   and `⏎` continues it with `claude --resume <session>`. A Claude tab that was running when
@@ -57,7 +59,7 @@ The name comes from the Slovak word *salaš*, a shepherd's hut up in the mountai
 - **Light and dark.** With `theme = "auto"` (the default) salash asks the terminal for its
   background colour at startup and matches it; set `"dark"` or `"light"` to choose. Programs in
   tabs that ask for the background (Claude Code, nvim) get the same answer.
-- **Cross-platform**: macOS, Linux, Windows (ConPTY). It's a single binary with its own
+- **macOS and Linux.** Windows isn't supported yet. It's a single binary with its own
   terminal emulation, so it doesn't need tmux.
 
 ## Install
@@ -67,7 +69,7 @@ Download the binary for your platform from
 Linux arm64 or Linux x86_64. The Linux builds are static (musl), so they run on any distro.
 
 ```sh
-tar xzf salash-v0.0.1-<target>.tar.gz
+tar xzf salash-v0.0.2-<target>.tar.gz
 mv salash ~/.local/bin/          # or anywhere on PATH
 xattr -d com.apple.quarantine ~/.local/bin/salash   # macOS only: the binary isn't signed
 ```
@@ -95,20 +97,22 @@ from salash, see [Tokens](#tokens), or its own login), a Jira API token for Jira
 ## Config
 
 `~/.config/salash/config.toml` on Linux, `~/Library/Application Support/salash/config.toml`
-on macOS, `%APPDATA%\salash\config.toml` on Windows. Override with `$SALASH_CONFIG`.
+on macOS. Override with `$SALASH_CONFIG`.
 A folder's `.salash/config.toml` overrides some of it for that folder's salash: `vault`,
-`notes_dir`, `prefix`, `local_prefix`, `bell`, `mouse` and `[[github]]` sources (without
-`path` and `token_env`; for a repo your own config also lists, yours are kept). For example,
-give a team folder its own vault and sources. Commands, repo paths, `token_env` and Jira only
-come from your own config, because a repo you clone can ship a `.salash/config.toml`.
+`notes_dir`, `prefix`, `local_prefix`, `bell`, `mouse`, `worktrees` and `[[github]]` sources
+(without `path` and `token_env`; for a repo your own config also lists, yours are kept). For
+example, give a team folder its own vault and sources. Commands, repo paths, `token_env` and Jira
+only come from your own config, because a repo you clone can ship a `.salash/config.toml`.
 salash ignores the rest and says so when it starts.
 
 ```toml
 vault = "~/Documents/Obsidian"
 notes_dir = "Issues"
+worktrees = true                # false = tabs start in the issue's repo, no worktree
 worktrees_dir = "~/worktrees"
 prefix = "ctrl-a"
 theme = "auto"                  # auto | dark | light
+seen_after_secs = 5             # a finished tab stays unread until shown this long; 0 = at once
 
 [[github]]
 repo = "johan/transport-sim"
@@ -116,6 +120,7 @@ path = "~/code/transport-sim"   # local clone used for worktrees
 id_prefix = "TS"                # -> TS-42-<slug>.md
 search = "assignee:@me"
 token_env = "WORK_GH_TOKEN"     # optional: env var holding the token (never the token itself)
+# worktrees = false             # this source only; overrides the global setting
 
 [[jira]]
 url = "https://yourcompany.atlassian.net"
@@ -132,7 +137,7 @@ Token values never go into `config.toml`. For each source salash looks, in this 
 1. the env var named by the source's `token_env`, if set;
 2. the OS keychain: service `salash`, account `github:owner/repo` or
    `jira:https://yourcompany.atlassian.net` (macOS Keychain; on Linux the Secret Service,
-   i.e. GNOME Keyring or KWallet; Windows Credential Manager);
+   i.e. GNOME Keyring or KWallet);
 3. `$GH_TOKEN` / `$JIRA_API_TOKEN` (`$GH_ENTERPRISE_TOKEN` for a GitHub Enterprise Server
    repo, `repo = "ghe.corp/owner/repo"`);
 4. GitHub only: whatever `gh` finds itself (`$GITHUB_TOKEN`, then `gh auth login`), as before.
@@ -184,9 +189,24 @@ use your confidential information stored in … in your keychain"; choose Always
 the Secret Service must be running when salash starts; a keyring daemon started later is only
 seen after restarting salash.
 
+### Turning worktrees off
+
+With `worktrees = false`, salash never runs `git worktree add` or `worktree_command`: an issue's
+tabs start in its repo (`repo_path:` from the note, else the source's `path`, else
+`local_repo`), and issues with no repo start in the default directory as before. Several issues
+on the same repo then share that one checkout, so switching branches is up to you. Set
+`worktrees` on a `[[github]]` or `[[jira]]` source to override the global value for that
+source only.
+
+A fresh config is written with `worktrees = false`; a config without the key keeps them on, so
+upgrading changes nothing. Turning the setting off only stops *new* worktrees: an issue whose
+worktree salash already made keeps using it, and every tab resumes in the directory it started
+in, whatever the setting is now. Changes take effect when salash restarts.
+
 ### Your own worktree script
 
-If a plain `git worktree add` isn't how you set up a checkout, set `worktree_command`:
+If a plain `git worktree add` isn't how you set up a checkout, set `worktree_command` (it's
+ignored when worktrees are off):
 
 ```toml
 worktree_command = ["~/bin/make-worktree.sh"]
@@ -263,7 +283,11 @@ On a suspended tab, `⏎` resumes, and the wheel, `↑` `↓` `PgUp` `PgDn` `g` 
 Claude tabs per issue.
 
 The mouse is captured so you can click issues, tabs, the To-do/Active/Done/Archive views,
-a tab's `×` to close it, and `quit` at the top of the sidebar. Closing and quitting ask first. Inside a tab, the wheel, clicks and
+a tab's `×` to close it, and `quit` at the top of the sidebar. Clicking an issue jumps into
+its last-used tab when that tab has a process (running, or exited with its last screen) or
+is suspended. A suspended or exited tab stays stopped until `⏎`. An issue with no started
+tab only gets selected, and a click never starts a tab. To get back to the sidebar, press
+`prefix s` or click a view name. Closing and quitting ask first. Inside a tab, the wheel, clicks and
 drags go to the app when it handles the mouse itself, as Claude Code does with
 `"tui": "fullscreen"`. Apps on the alternate screen that don't (`less`) get arrow keys from
 the wheel. Anything else scrolls salash's scrollback.
@@ -277,13 +301,14 @@ select text.
 ## How the Claude status works
 
 Each tab is started with `SALASH_TAB=<uuid>`. Claude tabs are launched as
-`claude --settings <data>/claude-hooks.json`. That file registers `salash hook` for
+`claude --settings <data>/claude-hooks.json --plugin-dir <data>/plugin`. The plugin holds
+salash's skills (see below) and is always passed. The settings file registers `salash hook` for
 `SessionStart`, `UserPromptSubmit`, `Pre/PostToolUse`, `PermissionRequest`,
 `Notification`, `Stop` and `SessionEnd`. The hook writes `<data>/status/<uuid>.json`
-and the UI polls it. The hook does nothing when `SALASH_TAB` isn't set, so it's safe to
-install globally. If you'd rather not use `--settings`, set `inject_hooks = false` and run
-`salash install-hooks`. That merges the hooks into `~/.claude/settings.json` and writes
-a backup first.
+and the UI polls it. They also get `--mcp-config=<data>/claude-mcp.json` (see below). The hook
+does nothing when `SALASH_TAB` isn't set, so it's safe to install globally. If you'd rather not
+use `--settings`, set `inject_hooks = false` and run `salash install-hooks`. That merges the
+hooks into `~/.claude/settings.json` and writes a backup first.
 
 Every tab also gets `SALASH_ISSUE`, `SALASH_NOTE` (the note's path), `SALASH_BIN` (the
 salash executable) and `SALASH_DATA` (its folder's `.salash`, where `<data>` is). You can tell
@@ -307,10 +332,48 @@ for salash to answer and fails if salash isn't running. Inside a tab it goes to 
 salash. Elsewhere it goes to the salash of the nearest folder above with a `.salash`, or the
 one given with `--folder`.
 
-`salash install-skill` adds the `/new-salash-tab` skill to `~/.claude/skills` (or
-`$CLAUDE_CONFIG_DIR`). In a Claude tab, `/new-salash-tab plan <task>` writes a handoff brief
-from the conversation and opens a new Claude tab in the same issue, started in that mode
-with the brief as its first prompt. It's like `/new-claude-tmux`, but without tmux.
+salash's own skills come as a Claude Code plugin named `salash`, built into the binary. Every
+time it starts, salash writes it to `<data>/plugin`, so it always matches the salash you have,
+and its Claude tabs load it with `--plugin-dir`. There is nothing to install, and Claude
+sessions outside salash never see it. In a Claude tab, `/salash:new-salash-tab plan <task>`
+writes a handoff brief from the conversation and opens a new Claude tab in the same issue,
+started in that mode with the brief as its first prompt. It's like `/new-claude-tmux`, but
+without tmux. Loading a plugin with `--plugin-dir` needs Claude Code 2.1.74 or later.
+
+Older salash versions had `salash install-skill`. If you ran it, you can delete
+`~/.claude/skills/new-salash-tab`: until you do, the old copy shows up as `/new-salash-tab`
+next to `/salash:new-salash-tab`, and it doesn't change when salash is upgraded.
+
+## Claude sees salash (MCP)
+
+`salash mcp [folder]` is an MCP server for Claude Code. It asks the folder's running salash
+about its issues, tabs, sessions and their status, and what a tab shows, and it can open tabs.
+The server stays the only owner of tabs and state. `salash mcp` fails if no salash runs
+there (`no salash running for <folder>; start salash first`) and never starts one.
+
+salash's own Claude tabs get it without any setup, with `--mcp-config` next to `--settings`.
+To turn that off, set `mcp = false` in your config. For Claude sessions outside salash:
+
+```sh
+claude mcp add salash -- salash mcp ~/work
+```
+
+| Tool | |
+|---|---|
+| `list_issues` | issues with stage, provider and URL, note, worktree and branch, the most urgent Claude status, tab count; filter by `stage` or `status`. Archive only when asked for |
+| `get_issue` | one issue with its tabs and its closed tabs (which `R` reopens) |
+| `list_tabs`, `get_tab` | tab id, name, kind, cwd, running/suspended/exited, and for Claude its session, status, last hook event and message, transcript and `claude --resume` command |
+| `read_screen` | what a tab shows, as plain text, like `tmux capture-pane -p`; with `scrollback`, the history above. A suspended tab gives its saved screen. Capped at 2000 lines and 32 KiB |
+| `open_tab` | the same as `salash tab new`: issue, kind, cwd, name, mode, prompt |
+
+The same comes as resources: `salash://issues`, `salash://issue/{id}`, `salash://tab/{id}` and
+`salash://tab/{id}/screen`. Inside a salash tab, tools without an issue or tab default to the
+caller's own, and the caller's tab is marked `"self": true`.
+
+Any Claude in a salash tab can read **every** tab's screen this way, in every issue: the same
+as anyone who can attach to salash. If that's too much, set `mcp = false`. `open_tab` takes
+only the modes `plan` and `manual`, or none for your default, so a session can't start another
+with fewer checks than its own. Run `salash tab new --mode …` yourself for the others.
 
 ## CLI
 
@@ -325,7 +388,7 @@ salash list
 salash install-hooks
 salash tab new [--issue ID] [--kind claude|shell|notes] [--cwd DIR] [--name NAME]
                [--mode MODE] [--prompt-file FILE] [--folder DIR]   # open a tab in a running salash
-salash install-skill   # add /new-salash-tab to ~/.claude/skills
+salash mcp [folder]    # MCP server on stdio for Claude Code (see above)
 ```
 
 ## Layout
@@ -335,6 +398,8 @@ src/
   server.rs     the folder's background server: clients, shared view, main loop
   client.rs     `salash` in your terminal: starts/attaches, forwards input, prints output
   proto.rs      client <-> server messages
+  query.rs      what `salash mcp` asks the server, and the answers
+  mcp.rs        `salash mcp`: the MCP server (rmcp) on stdio
   instance.rs   one salash per folder: .salash, socket, lock, moving old state
   app.rs        state, input routing, tab lifecycle, status polling
   ui.rs         ratatui rendering (sidebar, tab bar, terminal, popups)
@@ -344,6 +409,7 @@ src/
   vault.rs      Obsidian notes (todo/active/done/archive), slugs, frontmatter
   providers.rs  GitHub (gh), Jira REST v3
   status.rs     Claude Code hook handler and settings
+  plugin.rs     salash's skills as a Claude Code plugin, written to <data>/plugin
   api.rs        `salash tab new` requests to the running salash
   worktree.rs   per-issue git worktrees
   state.rs      persisted tabs, session IDs and saved screens
@@ -356,8 +422,6 @@ src/
 - Tabs keep running while you're detached, but quitting salash stops them. Claude tabs
   resume from their session ID afterwards, shells don't. `kill $(cat <folder>/.salash/server.lock)`
   stops a server from outside the same way `q` does.
-- On Windows the server's named pipe has the default permissions, so other users on the same
-  machine may be able to attach. Use it single-user there for now.
 - Everyone attached shares one view, sized to the smallest client. Window-size options,
   per-client views and read-only clients are planned in [docs/multi-client.md](docs/multi-client.md).
 - OSC 52 isn't passed on, so text selected by dragging inside fullscreen Claude Code doesn't

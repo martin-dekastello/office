@@ -45,6 +45,11 @@ window:
   and the keychain, Claude account, ssh agent). Being able to attach is the same as being able
   to run commands as that user. Grant it accordingly. tmux works the same way, which is why it added
   `server-access`.
+- **`salash mcp` reads through the same socket.** Whoever can attach can also run `salash mcp`
+  and read every tab's screen, in every issue, as plain text. salash's own Claude tabs get it
+  by default, so any Claude session in salash can read what every other tab shows. That is no
+  more than attaching already allows. `mcp = false` in your config turns it off for salash's
+  tabs. It doesn't stop someone who can attach from running `salash mcp` themselves.
 - The server and its tabs keep the environment of the `salash` that started them: `PATH`,
   `SSH_AUTH_SOCK`, tokens. Attaching later doesn't change it, much as tmux behaves without
   `update-environment`.
@@ -52,10 +57,6 @@ window:
   folder's `.salash/config.toml`. On a shared server, put team settings (vault, GitHub
   sources, prefix) in the folder's file. Commands, repo paths and Jira stay in the starting
   user's own config; the folder's file can't set them.
-- Windows: the named pipe is created with the default security descriptor, so other users
-  on the same machine may be able to open it. Treat a Windows machine as single-user until
-  the listener sets an owner-only descriptor (interprocess's `SecurityDescriptor::deserialize`
-  with SDDL `D:P(A;;GA;;;OW)`, passed through `ListenerOptionsExt::security_descriptor`).
 
 ## Settings for later
 

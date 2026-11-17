@@ -74,6 +74,8 @@ struct Client {
     writer: JoinHandle<()>,
     /// Columns and rows, once it sent its size.
     size: Option<(u16, u16)>,
+    /// It asked a `Query`: `salash mcp`, not a terminal. It gets replies only.
+    asks: bool,
     /// What its screen shows, for the diff. None means it needs a full redraw.
     term: Option<ClientTerm>,
     sink: Sink,
@@ -90,6 +92,12 @@ impl Client {
             }
             Err(TrySendError::Disconnected(_)) => false,
         }
+    }
+
+    /// Send a reply, which is never dropped: false on a full backlog too, so
+    /// the asker is cut off and asks again rather than waiting in vain.
+    fn reply(&mut self, m: ServerMsg) -> bool {
+        self.out.try_send(m).is_ok()
     }
 
     /// Send its last message, waiting behind a full backlog rather than
@@ -183,8 +191,6 @@ fn lock(inst: &Instance) -> Result<std::fs::File> {
             Err(_) if Instant::now() < deadline && !inst.socket_path().exists() => {
                 std::thread::sleep(Duration::from_millis(50));
             }
-            #[cfg(windows)]
-            Err(_) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(50)),
             Err(e) => return Err(e),
         }
     }
@@ -332,9 +338,23 @@ impl Server {
     fn on(&mut self, m: Incoming, app: &mut App) {
         match m {
             Incoming::Connected(id, out, writer) => {
-                let mut c = Client { out, writer, size: None, term: None, sink: Sink::default() };
+                let mut c = Client { out, writer, size: None, asks: false, term: None, sink: Sink::default() };
                 if c.send(ServerMsg::Welcome { version: crate::proto::VERSION, mouse: self.mouse }) {
                     self.clients.insert(id, c);
+                }
+            }
+            Incoming::Msg(id, ClientMsg::Query { id: qid, query }) => {
+                // An asker known to be gone isn't answered: opening its tab
+                // could only start a second one once it retries.
+                if !self.clients.contains_key(&id) {
+                    return;
+                }
+                let answer = crate::query::answer(app, query);
+                if let Some(c) = self.clients.get_mut(&id) {
+                    c.asks = true;
+                    if !c.reply(ServerMsg::Reply { id: qid, answer }) {
+                        self.clients.remove(&id);
+                    }
                 }
             }
             Incoming::Msg(id, ClientMsg::Event(Event::Resize(cols, rows))) => {
@@ -366,8 +386,10 @@ impl Server {
         }
     }
 
+    /// Send to every terminal, not to `salash mcp`: output it never reads
+    /// would only fill its backlog.
     fn broadcast(&mut self, m: ServerMsg) {
-        self.clients.retain(|_, c| c.send(m.clone()));
+        self.clients.retain(|_, c| c.asks || c.send(m.clone()));
     }
 
     fn render(&mut self, app: &mut App) {
@@ -443,13 +465,6 @@ pub fn spawn(inst: &Instance) -> Result<()> {
                 Ok(())
             });
         }
-    }
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        const DETACHED_PROCESS: u32 = 0x0000_0008;
-        const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
-        cmd.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
     }
     cmd.spawn().context("starting the salash server")?;
     Ok(())

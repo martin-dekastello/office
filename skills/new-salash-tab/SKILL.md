@@ -1,15 +1,15 @@
 ---
 name: new-salash-tab
-description: Open a new Claude Code tab in the same salash issue, seeded with a handoff brief of the relevant context from this conversation and started in a chosen permission mode (plan, auto, acceptEdits, manual, dontAsk, bypass). Use when the user says "/new-salash-tab plan …", "spin off a new claude tab for …", or wants to hand a task to a parallel session while running inside salash.
+description: Open a new Claude Code tab in the same salash issue, seeded with a handoff brief of the relevant context from this conversation and started in a chosen permission mode (plan, auto, acceptEdits, manual, dontAsk, bypass). Use when the user says "/salash:new-salash-tab plan …" (or "/new-salash-tab plan …"), "spin off a new claude tab for …", or wants to hand a task to a parallel session while running inside salash.
 ---
 
 # Spin off a new Claude tab in salash
 
-`/new-salash-tab [mode] <task…>` opens a new Claude tab in the salash issue this session
-belongs to. The tab runs in the given permission mode, and its first prompt is a handoff
-brief: the relevant context from this conversation plus the task. You are the *calling*
-session. The new one starts with no context, so the brief is everything it knows. The tab
-opens in the background, so the user stays where they are.
+`/salash:new-salash-tab [mode] <task…>` opens a new Claude tab in the salash issue this
+session belongs to. The tab runs in the given permission mode, and its first prompt is a
+handoff brief: the relevant context from this conversation plus the task. You are the
+*calling* session. The new one starts with no context, so the brief is everything it knows.
+The tab opens in the background, so the user stays where they are.
 
 ## 1. Check you're inside salash
 
@@ -44,8 +44,9 @@ equally plausible, ask the user one short question. Gather repo state from *that
 
 ## 4. Write the handoff brief
 
-Write it to `${TMPDIR:-/tmp}/new-salash-tab/<YYYYmmdd-HHMMSS>-<slug>.md`, creating the
-directory if needed. From this conversation, distil only what the new task needs:
+Write it to `$SALASH_DATA/briefs/<YYYYmmdd-HHMMSS>-<slug>.md`, creating the directory if
+needed. That is salash's own data folder, not a shared temp dir. From this conversation,
+distil only what the new task needs:
 
 ```markdown
 # Handoff: <short title>

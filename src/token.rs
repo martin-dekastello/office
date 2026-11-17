@@ -1,6 +1,5 @@
 //! Where sync gets GitHub and Jira tokens: an env var or the OS keychain
-//! (macOS Keychain, the Secret Service on Linux, Credential Manager on
-//! Windows). Token values never go into config.toml, argv or `.salash/`.
+//! (macOS Keychain, the Secret Service on Linux). Token values never go into config.toml, argv or `.salash/`.
 
 use crate::config::Config;
 use crate::providers;

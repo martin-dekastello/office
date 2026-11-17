@@ -407,7 +407,7 @@ mod tests {
     }
 
     fn github_repo(repo: &str) -> Github {
-        Github(GithubSource { repo: repo.into(), path: None, id_prefix: None, search: None, token_env: None })
+        Github(GithubSource { repo: repo.into(), path: None, id_prefix: None, search: None, token_env: None, worktrees: None })
     }
 
     fn github() -> Github {
@@ -415,7 +415,7 @@ mod tests {
     }
 
     fn jira(url: &str) -> Jira {
-        Jira(JiraSource { url: url.into(), email: "me@x.io".into(), token_env: None, jql: None, path: None })
+        Jira(JiraSource { url: url.into(), email: "me@x.io".into(), token_env: None, jql: None, path: None, worktrees: None })
     }
 
     #[test]
