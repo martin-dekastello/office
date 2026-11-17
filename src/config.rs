@@ -14,6 +14,8 @@ pub struct GithubSource {
     pub id_prefix: Option<String>,
     /// `gh issue list --search` query. Default: "assignee:@me".
     pub search: Option<String>,
+    /// Overrides the global `worktrees` for this source's issues.
+    pub worktrees: Option<bool>,
 }
 
 /// A Jira Cloud site to pull issues from (REST API v3).
@@ -28,6 +30,8 @@ pub struct JiraSource {
     pub jql: Option<String>,
     /// Local clone used to create per-issue worktrees.
     pub path: Option<PathBuf>,
+    /// Overrides the global `worktrees` for this source's issues.
+    pub worktrees: Option<bool>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -39,6 +43,8 @@ pub struct Config {
     pub notes_dir: String,
     /// Where per-issue git worktrees are created: <worktrees_dir>/<repo>/<id>-<slug>
     pub worktrees_dir: PathBuf,
+    /// Create a worktree per issue. Off, an issue's tabs start in its repo.
+    pub worktrees: bool,
     /// Creates an issue's worktree instead of plain `git worktree add`. Run as
     /// `<command…> <repo> <id>-<slug>` in the repo; prints the worktree's path last.
     pub worktree_command: Vec<String>,
@@ -86,6 +92,7 @@ impl Default for Config {
                 .join("Obsidian"),
             notes_dir: "Issues".into(),
             worktrees_dir: home.join("worktrees"),
+            worktrees: true,
             worktree_command: vec![],
             claude_command: claude,
             shell_command: vec![],
@@ -108,17 +115,21 @@ impl Default for Config {
 
 const TEMPLATE: &str = r#"# salash configuration
 # <folder>/.salash/config.toml can override vault, notes_dir, prefix, local_prefix,
-# bell, mouse and [[github]] (without path) for `salash <folder>`. Commands, repo
+# bell, mouse, worktrees and [[github]] (without path) for `salash <folder>`. Commands, repo
 # paths and Jira only come from here: a repo can ship its own .salash/config.toml.
 
 # Obsidian vault root and the folder inside it that holds active/ done/ archive/
 vault = "{VAULT}"
 notes_dir = "Issues"
 
-# Per-issue git worktrees go to <worktrees_dir>/<repo>/<id>-<slug>
+# true = one git worktree + branch per issue; false = an issue's tabs start in its repo.
+# A [[github]] or [[jira]] source can set its own.
+worktrees = false
+
+# With worktrees on, per-issue git worktrees go to <worktrees_dir>/<repo>/<id>-<slug>
 worktrees_dir = "{WORKTREES}"
 
-# Your own script for creating worktrees, run as `<command…> <repo> <id>-<slug>` in the
+# With worktrees on, your own script for creating them, run as `<command…> <repo> <id>-<slug>` in the
 # repo when an issue's first Claude or shell tab opens. It must print the worktree's
 # path as its last line of output. Default: `git worktree add` into worktrees_dir.
 # worktree_command = ["~/bin/make-worktree.sh"]
@@ -143,6 +154,7 @@ prefix = "ctrl-a"
 # path = "~/code/transport-sim"   # local clone for worktrees
 # id_prefix = "TS"                # notes become TS-42-<slug>.md
 # search = "assignee:@me"
+# worktrees = true                # this source's own setting
 
 # [[jira]]
 # url = "https://yourcompany.atlassian.net"
@@ -150,6 +162,7 @@ prefix = "ctrl-a"
 # token_env = "JIRA_API_TOKEN"
 # jql = "assignee = currentUser() AND statusCategory != Done ORDER BY updated DESC"
 # path = "~/code/backend"
+# worktrees = true
 "#;
 
 pub fn config_path() -> PathBuf {
@@ -295,29 +308,39 @@ impl Config {
         vec!["vi".into()]
     }
 
+    fn github_for(&self, repo: Option<&str>) -> Option<&GithubSource> {
+        self.github.iter().find(|g| Some(g.repo.as_str()) == repo)
+    }
+
+    fn jira_for(&self, repo: Option<&str>) -> Option<&JiraSource> {
+        self.jira.iter().find(|j| Some(j.url.as_str()) == repo).or(self.jira.first())
+    }
+
     /// Resolve the local repository path for an issue.
     pub fn repo_path_for(&self, source: &str, repo: Option<&str>) -> Option<PathBuf> {
         match source {
-            "github" => self
-                .github
-                .iter()
-                .find(|g| Some(g.repo.as_str()) == repo)
-                .and_then(|g| g.path.clone()),
-            "jira" => self
-                .jira
-                .iter()
-                .find(|j| Some(j.url.as_str()) == repo)
-                .or(self.jira.first())
-                .and_then(|j| j.path.clone()),
+            "github" => self.github_for(repo).and_then(|g| g.path.clone()),
+            "jira" => self.jira_for(repo).and_then(|j| j.path.clone()),
             _ => self.local_repo.clone(),
         }
+    }
+
+    /// Whether an issue gets its own worktree: its source's setting, else the global one.
+    pub fn worktrees_for(&self, source: &str, repo: Option<&str>) -> bool {
+        let own = match source {
+            "github" => self.github_for(repo).and_then(|g| g.worktrees),
+            "jira" => self.jira_for(repo).and_then(|j| j.worktrees),
+            _ => None,
+        };
+        own.unwrap_or(self.worktrees)
     }
 }
 
 /// What a folder's own config may set. A cloned repo can ship
 /// `.salash/config.toml`, so nothing that runs commands or sends credentials:
 /// no `*_command`, no repo paths (worktrees run their hooks), no Jira.
-const FOLDER_KEYS: &[&str] = &["vault", "notes_dir", "prefix", "local_prefix", "bell", "mouse", "github"];
+/// `worktrees` only turns worktrees off or back on, so it may.
+const FOLDER_KEYS: &[&str] = &["vault", "notes_dir", "prefix", "local_prefix", "bell", "mouse", "worktrees", "github"];
 
 /// A folder's `.salash/config.toml`, cut down to `FOLDER_KEYS`, and the keys it lost.
 fn folder_overlay(path: &Path) -> Result<(toml::Table, Vec<String>)> {
@@ -405,6 +428,71 @@ mod tests {
         assert_eq!(toml::from_str::<Config>("").unwrap().seen_after_secs, 5);
         assert_eq!(toml::from_str::<Config>("seen_after_secs = 0").unwrap().seen_after_secs, 0);
         assert!(!FOLDER_KEYS.contains(&"seen_after_secs"));
+    }
+
+    #[test]
+    fn worktrees_default_on_but_a_fresh_config_turns_them_off() {
+        assert!(toml::from_str::<Config>("").unwrap().worktrees);
+        assert!(!toml::from_str::<Config>("worktrees = false").unwrap().worktrees);
+        let fresh = TEMPLATE.replace("{VAULT}", "/v").replace("{WORKTREES}", "/w");
+        assert!(!toml::from_str::<Config>(&fresh).unwrap().worktrees);
+    }
+
+    #[test]
+    fn a_source_overrides_the_global_worktrees_setting() {
+        let cfg: Config = toml::from_str(
+            r#"
+            worktrees = true
+            [[github]]
+            repo = "a/off"
+            worktrees = false
+            [[github]]
+            repo = "a/plain"
+            [[jira]]
+            url = "https://one.example"
+            email = "x"
+            worktrees = false
+            [[jira]]
+            url = "https://two.example"
+            email = "x"
+            "#,
+        )
+        .unwrap();
+        assert!(!cfg.worktrees_for("github", Some("a/off")));
+        assert!(cfg.worktrees_for("github", Some("a/plain")));
+        assert!(cfg.worktrees_for("github", Some("a/unknown")));
+        assert!(!cfg.worktrees_for("jira", Some("https://one.example")));
+        assert!(cfg.worktrees_for("jira", Some("https://two.example")));
+        // An unknown Jira site falls back to the first, as its repo path does.
+        assert!(!cfg.worktrees_for("jira", None));
+        assert!(cfg.worktrees_for("local", None));
+
+        let off = Config { worktrees: false, ..cfg };
+        assert!(!off.worktrees_for("github", Some("a/plain")));
+        assert!(!off.worktrees_for("local", None));
+        assert!(!off.worktrees_for("jira", Some("https://two.example")));
+    }
+
+    #[test]
+    fn a_folder_config_may_turn_worktrees_off() {
+        let dir = std::env::temp_dir().join(format!("salash-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let over = dir.join("config.toml");
+        std::fs::write(
+            &over,
+            r#"
+            worktrees = false
+            [[github]]
+            repo = "a/one"
+            worktrees = true
+            "#,
+        )
+        .unwrap();
+        let (t, dropped) = folder_overlay(&over).unwrap();
+        assert!(dropped.is_empty(), "{dropped:?}");
+        assert_eq!(t["worktrees"].as_bool(), Some(false));
+        assert_eq!(t["github"][0]["worktrees"].as_bool(), Some(true));
+        std::fs::remove_dir_all(dir).ok();
     }
 
     #[test]

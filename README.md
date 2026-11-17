@@ -41,7 +41,8 @@ The name comes from the Slovak word *salaš*, a shepherd's hut up in the mountai
 - **One git worktree + branch per issue** (`<worktrees_dir>/<repo>/<id>-<slug>`), so all
   tabs of an issue share one checkout. It's created when the issue's first Claude or shell tab
   opens, not before, so issues you never work on take no disk space. Bring your own script
-  with `worktree_command`.
+  with `worktree_command`, or set `worktrees = false` to manage checkouts yourself: tabs then
+  start in the issue's repo.
 - **Sessions can be stopped and picked up again.** Press `z` to suspend an inactive Claude
   tab: its process stops and its RAM is freed, but you can still scroll its saved screen,
   and `⏎` continues it with `claude --resume <session>`. A Claude tab that was running when
@@ -98,14 +99,15 @@ Requirements: `claude` on PATH, `git` for worktrees, `gh` (logged in) for GitHub
 `~/.config/salash/config.toml` on Linux, `~/Library/Application Support/salash/config.toml`
 on macOS. Override with `$SALASH_CONFIG`.
 A folder's `.salash/config.toml` overrides some of it for that folder's salash: `vault`,
-`notes_dir`, `prefix`, `local_prefix`, `bell`, `mouse` and `[[github]]` sources (without
-`path`). For example, give a team folder its own vault and sources. Commands, repo paths and
+`notes_dir`, `prefix`, `local_prefix`, `bell`, `mouse`, `worktrees` and `[[github]]` sources
+(without `path`). For example, give a team folder its own vault and sources. Commands, repo paths and
 Jira only come from your own config, because a repo you clone can ship a `.salash/config.toml`.
 salash ignores the rest and says so when it starts.
 
 ```toml
 vault = "~/Documents/Obsidian"
 notes_dir = "Issues"
+worktrees = true                # false = tabs start in the issue's repo, no worktree
 worktrees_dir = "~/worktrees"
 prefix = "ctrl-a"
 theme = "auto"                  # auto | dark | light
@@ -116,6 +118,7 @@ repo = "johan/transport-sim"
 path = "~/code/transport-sim"   # local clone used for worktrees
 id_prefix = "TS"                # -> TS-42-<slug>.md
 search = "assignee:@me"
+# worktrees = false             # this source only; overrides the global setting
 
 [[jira]]
 url = "https://yourcompany.atlassian.net"
@@ -125,9 +128,24 @@ jql = "assignee = currentUser() AND statusCategory != Done ORDER BY updated DESC
 path = "~/code/backend"
 ```
 
+### Turning worktrees off
+
+With `worktrees = false`, salash never runs `git worktree add` or `worktree_command`: an issue's
+tabs start in its repo (`repo_path:` from the note, else the source's `path`, else
+`local_repo`), and issues with no repo start in the default directory as before. Several issues
+on the same repo then share that one checkout, so switching branches is up to you. Set
+`worktrees` on a `[[github]]` or `[[jira]]` source to override the global value for that
+source only.
+
+A fresh config is written with `worktrees = false`; a config without the key keeps them on, so
+upgrading changes nothing. Turning the setting off only stops *new* worktrees: an issue whose
+worktree salash already made keeps using it, and every tab resumes in the directory it started
+in, whatever the setting is now. Changes take effect when salash restarts.
+
 ### Your own worktree script
 
-If a plain `git worktree add` isn't how you set up a checkout, set `worktree_command`:
+If a plain `git worktree add` isn't how you set up a checkout, set `worktree_command` (it's
+ignored when worktrees are off):
 
 ```toml
 worktree_command = ["~/bin/make-worktree.sh"]
