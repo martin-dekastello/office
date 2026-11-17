@@ -285,6 +285,8 @@ pub struct App {
     /// For the client whose input this is: what to copy or open on its side.
     pub outbox: Vec<ServerMsg>,
     hooks_settings: Option<PathBuf>,
+    /// The `--mcp-config` file Claude tabs get, unless `mcp = false`.
+    mcp_config: Option<PathBuf>,
     /// salash's plugin (its skills), passed as `claude --plugin-dir`.
     plugin_dir: Option<PathBuf>,
     bell_pending: bool,
@@ -326,12 +328,13 @@ fn home() -> PathBuf {
     dirs::home_dir().unwrap_or_else(|| PathBuf::from("."))
 }
 
-/// Claude's argv: the configured command, salash's hooks settings and plugin
-/// when given, then `--resume <session>` or, on a first launch, `first_args`.
+/// Claude's argv: the configured command, salash's hooks settings, plugin and
+/// MCP config when given, then `--resume <session>` or, on a first launch, `first_args`.
 fn claude_argv(
     cmd: &[String],
     settings: Option<&Path>,
     plugin: Option<&Path>,
+    mcp: Option<&Path>,
     session: Option<&str>,
     first_args: Vec<String>,
 ) -> Vec<String> {
@@ -343,6 +346,11 @@ fn claude_argv(
     if let Some(p) = plugin {
         v.push("--plugin-dir".into());
         v.push(p.to_string_lossy().into_owned());
+    }
+    // One argument: `--mcp-config` takes several values, so a separate path
+    // would take a first prompt after it as another.
+    if let Some(m) = mcp {
+        v.push(format!("--mcp-config={}", m.display()));
     }
     match session {
         Some(sid) => {
@@ -365,6 +373,7 @@ impl App {
         let notes = vault.scan();
         let state = State::load();
         let hooks_settings = if cfg.inject_hooks { status::write_settings_file().ok() } else { None };
+        let mcp_config = if cfg.mcp { status::write_mcp_file(&folder).ok() } else { None };
         // Not tied to inject_hooks: --plugin-dir leaves ~/.claude alone.
         let plugin_dir = crate::config::data_dir().join("plugin");
         let plugin_dir = match plugin::write_to(&plugin_dir) {
@@ -374,7 +383,7 @@ impl App {
                 None
             }
         };
-        let mut app = App::with_parts(cfg, folder, vault, notes, state, hooks_settings, plugin_dir);
+        let mut app = App::with_parts(cfg, folder, vault, notes, state, hooks_settings, mcp_config, plugin_dir);
         if let Some(n) = app.selected_note() {
             app.view = n.stage;
         } else if app.count(Stage::Active) == 0 {
@@ -396,7 +405,8 @@ impl App {
     }
 
     /// The app over what `new` loaded, with no disk access and no sync.
-    fn with_parts(cfg: Config, folder: PathBuf, vault: Vault, notes: Vec<Note>, state: State, hooks_settings: Option<PathBuf>, plugin_dir: Option<PathBuf>) -> App {
+    #[allow(clippy::too_many_arguments)]
+    fn with_parts(cfg: Config, folder: PathBuf, vault: Vault, notes: Vec<Note>, state: State, hooks_settings: Option<PathBuf>, mcp_config: Option<PathBuf>, plugin_dir: Option<PathBuf>) -> App {
         let prefix = keys::parse_prefix(&cfg.prefix);
         App {
             selected: state.selected.clone().filter(|id| {
@@ -424,6 +434,7 @@ impl App {
             detach: false,
             outbox: vec![],
             hooks_settings,
+            mcp_config,
             plugin_dir,
             bell_pending: false,
             term_rect: Rect::default(),
@@ -842,6 +853,7 @@ impl App {
                 &self.cfg.claude_command,
                 self.hooks_settings.as_deref(),
                 self.plugin_dir.as_deref(),
+                self.mcp_config.as_deref(),
                 st.claude_session.as_deref(),
                 first_args,
             ),
@@ -948,7 +960,7 @@ impl App {
         }
     }
 
-    fn open_requested(&mut self, req: Request) -> Reply {
+    pub fn open_requested(&mut self, req: Request) -> Reply {
         if let Err(e) = req.check() {
             return Reply::err(format!("{e:#}"));
         }
@@ -1896,20 +1908,33 @@ mod tests {
     }
 
     #[test]
-    fn claude_gets_hooks_and_plugin_before_its_own_args() {
-        let (s, p) = (Path::new("/d/claude-hooks.json"), Path::new("/d/plugin"));
-        let first = claude_argv(&strs(&["claude"]), Some(s), Some(p), None, strs(&["--permission-mode", "plan", "brief"]));
+    fn claude_gets_hooks_plugin_and_mcp_before_its_own_args() {
+        let (s, p, m) = (Path::new("/d/claude-hooks.json"), Path::new("/d/plugin"), Path::new("/d/claude-mcp.json"));
+        let first = claude_argv(&strs(&["claude"]), Some(s), Some(p), Some(m), None, strs(&["--permission-mode", "plan", "brief"]));
         assert_eq!(
             first,
-            strs(&["claude", "--settings", "/d/claude-hooks.json", "--plugin-dir", "/d/plugin", "--permission-mode", "plan", "brief"])
+            strs(&[
+                "claude",
+                "--settings",
+                "/d/claude-hooks.json",
+                "--plugin-dir",
+                "/d/plugin",
+                "--mcp-config=/d/claude-mcp.json",
+                "--permission-mode",
+                "plan",
+                "brief"
+            ])
         );
-        let resumed = claude_argv(&strs(&["claude"]), Some(s), Some(p), Some("sid"), strs(&["ignored"]));
-        assert_eq!(resumed, strs(&["claude", "--settings", "/d/claude-hooks.json", "--plugin-dir", "/d/plugin", "--resume", "sid"]));
+        let resumed = claude_argv(&strs(&["claude"]), Some(s), Some(p), Some(m), Some("sid"), strs(&["ignored"]));
+        assert_eq!(
+            resumed,
+            strs(&["claude", "--settings", "/d/claude-hooks.json", "--plugin-dir", "/d/plugin", "--mcp-config=/d/claude-mcp.json", "--resume", "sid"])
+        );
     }
 
     #[test]
     fn without_injection_claude_gets_neither() {
-        let v = claude_argv(&strs(&["npx", "claude"]), None, None, Some("sid"), vec![]);
+        let v = claude_argv(&strs(&["npx", "claude"]), None, None, None, Some("sid"), vec![]);
         assert_eq!(v, strs(&["npx", "claude", "--resume", "sid"]));
     }
 
@@ -2005,7 +2030,7 @@ mod tests {
     fn app(tabs: &[(&str, &[&str])]) -> App {
         let notes = tabs.iter().map(|(id, _)| note(id)).collect();
         let vault = Vault { root: PathBuf::from("/nonexistent") };
-        let mut app = App::with_parts(Config::default(), PathBuf::from("/"), vault, notes, State::default(), None, None);
+        let mut app = App::with_parts(Config::default(), PathBuf::from("/"), vault, notes, State::default(), None, None, None);
         for (id, ids) in tabs {
             let tabs = ids
                 .iter()

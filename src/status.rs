@@ -10,8 +10,9 @@ use serde_json::{json, Value};
 use std::io::Read;
 use std::path::PathBuf;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, rmcp::schemars::JsonSchema)]
 #[serde(rename_all = "lowercase")]
+#[schemars(crate = "rmcp::schemars")]
 pub enum ClaudeStatus {
     /// Process started, no hook seen yet.
     Starting,
@@ -184,6 +185,20 @@ pub fn write_settings_file() -> Result<PathBuf> {
     let path = crate::config::data_dir().join("claude-hooks.json");
     std::fs::create_dir_all(path.parent().unwrap())?;
     let v = json!({ "hooks": hooks_value(&hook_command()?) });
+    std::fs::write(&path, serde_json::to_vec_pretty(&v)?)?;
+    Ok(path)
+}
+
+/// Write the file passed to `claude --mcp-config`: `salash mcp <folder>` as
+/// a stdio server named salash. Returns its path.
+pub fn write_mcp_file(folder: &std::path::Path) -> Result<PathBuf> {
+    let path = crate::config::data_dir().join("claude-mcp.json");
+    let exe = std::env::current_exe().context("locating salash executable")?;
+    let v = json!({ "mcpServers": { "salash": {
+        "type": "stdio",
+        "command": exe,
+        "args": ["mcp", folder],
+    }}});
     std::fs::write(&path, serde_json::to_vec_pretty(&v)?)?;
     Ok(path)
 }

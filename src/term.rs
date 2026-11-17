@@ -105,6 +105,62 @@ fn encode(p: &mut Parser, history: &[u8]) -> Vec<u8> {
     out
 }
 
+/// Most rows and bytes of text one read of a tab returns, so its whole
+/// scrollback can't flood whoever asked (a Claude session, over MCP).
+pub const MAX_LINES: usize = 2000;
+pub const MAX_TEXT: usize = 32 << 10;
+
+/// The last `lines` rows as plain text, like `tmux capture-pane -p`: the
+/// screen, with history above it if `scrollback`. `lines` 0 is the screen. No escape codes; a wide
+/// character comes out once. Trailing blanks are dropped. Past `MAX_TEXT` the
+/// oldest rows go, and the first line says so.
+fn text(p: &mut Parser, lines: usize, scrollback: bool) -> String {
+    let screen = p.screen_mut();
+    let keep = screen.scrollback();
+    let (rows, cols) = screen.size();
+    let history = scrollback && lines > 0;
+    let lines = if lines == 0 { rows as usize } else { lines.min(MAX_LINES) };
+    let mut out: Vec<String> = vec![];
+    if history {
+        // Up to `lines` history rows, a page at a time, oldest first: the
+        // screen's trailing blanks are dropped below, so its rows can't be
+        // counted towards `lines` yet.
+        screen.set_scrollback(usize::MAX);
+        let mut left = lines.min(screen.scrollback());
+        while left > 0 {
+            screen.set_scrollback(left);
+            let n = left.min(rows as usize);
+            out.extend(screen.rows(0, cols).take(n));
+            left -= n;
+        }
+    }
+    screen.set_scrollback(0);
+    out.extend(screen.rows(0, cols));
+    screen.set_scrollback(keep);
+
+    let mut out: Vec<String> = out.into_iter().map(|l| l.trim_end().to_string()).collect();
+    while out.last().is_some_and(|l| l.is_empty()) {
+        out.pop();
+    }
+    let mut from = out.len().saturating_sub(lines);
+    let mut size: usize = out[from..].iter().map(|l| l.len() + 1).sum();
+    let mut cut = 0;
+    while size > MAX_TEXT && from < out.len() {
+        size -= out[from].len() + 1;
+        from += 1;
+        cut += 1;
+    }
+    let mut text = String::new();
+    if cut > 0 {
+        text.push_str(&format!("[{cut} older lines cut: at most {} KiB]\n", MAX_TEXT >> 10));
+    }
+    for l in &out[from..] {
+        text.push_str(l);
+        text.push('\n');
+    }
+    text
+}
+
 /// The session id from Claude's exit hint, if it's at the end of the text.
 /// Only the end counts: a session can print resume commands in its own output.
 fn parse_resume_id(text: &str) -> Option<String> {
@@ -138,6 +194,11 @@ impl Snapshot {
 
     pub fn scroll_by(&mut self, delta: isize) {
         self.scroll = scroll_parser(&mut self.parser, self.scroll, delta);
+    }
+
+    /// See `text`.
+    pub fn text(&mut self, lines: usize, scrollback: bool) -> String {
+        text(&mut self.parser, lines, scrollback)
     }
 }
 
@@ -446,6 +507,11 @@ impl Pane {
         Some(sel.text(&mut self.parser.lock().unwrap())).filter(|t| !t.trim().is_empty())
     }
 
+    /// See `text`.
+    pub fn text(&self, lines: usize, scrollback: bool) -> String {
+        text(&mut self.parser.lock().unwrap(), lines, scrollback)
+    }
+
     pub fn snapshot(&self, history: &[u8]) -> Vec<u8> {
         encode(&mut self.parser.lock().unwrap(), history)
     }
@@ -485,6 +551,50 @@ mod tests {
     use super::*;
     use crossterm::event::MouseEventKind;
     use std::time::{Duration, Instant};
+
+    fn parser(rows: u16, cols: u16) -> Parser {
+        vt100::Parser::new_with_callbacks(rows, cols, SCROLLBACK, Callbacks::default())
+    }
+
+    #[test]
+    fn text_is_plain_with_wide_chars_whole() {
+        let mut p = parser(5, 20);
+        p.process("\x1b[1;31m日本語\x1b[m ok  \r\n\x1b[3;5Hthere\x1b[?25l".as_bytes());
+        assert_eq!(text(&mut p, 50, false), "日本語 ok\n\n    there\n");
+    }
+
+    #[test]
+    fn text_reaches_into_scrollback_only_when_asked() {
+        let mut p = parser(3, 10);
+        for i in 0..10 {
+            p.process(format!("line {i}\r\n").as_bytes());
+        }
+        p.screen_mut().set_scrollback(4);
+        // The screen holds "line 8", "line 9" and the empty row the cursor is on.
+        assert_eq!(text(&mut p, 50, false), "line 8\nline 9\n");
+        // The blank row the cursor is on doesn't count towards the five.
+        assert_eq!(text(&mut p, 5, true), "line 5\nline 6\nline 7\nline 8\nline 9\n");
+        let all = text(&mut p, 50, true);
+        assert!(all.starts_with("line 0\n") && all.ends_with("line 9\n"), "{all}");
+        assert_eq!(text(&mut p, 1, true), "line 9\n", "the last rows win");
+        assert_eq!(text(&mut p, 0, true), "line 8\nline 9\n", "0 is the screen");
+        // What the user scrolled to stays.
+        assert_eq!(p.screen().scrollback(), 4);
+    }
+
+    #[test]
+    fn text_is_capped_keeping_the_newest() {
+        let mut p = parser(10, 200);
+        let long = "x".repeat(199);
+        for _ in 0..400 {
+            p.process(format!("{long}\r\n").as_bytes());
+        }
+        p.process(b"last");
+        let t = text(&mut p, MAX_LINES, true);
+        assert!(t.len() <= MAX_TEXT + 100, "{}", t.len());
+        assert!(t.starts_with('[') && t.lines().next().unwrap().contains("older lines cut"));
+        assert!(t.ends_with("last\n"));
+    }
 
     fn wait_until(mut done: impl FnMut() -> bool) {
         let start = Instant::now();

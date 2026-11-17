@@ -20,7 +20,7 @@ use std::time::{Duration, Instant};
 /// How long a newly started server may take to open its socket.
 const START_TIMEOUT: Duration = Duration::from_secs(5);
 
-fn connect(inst: &Instance) -> Result<Stream> {
+pub fn connect(inst: &Instance) -> Result<Stream> {
     #[cfg(unix)]
     inst.check_socket()?;
     Ok(Stream::connect(inst.socket_name()?)?)
@@ -67,6 +67,15 @@ pub fn attach(inst: &Instance) -> Result<()> {
     run(inst, conn)
 }
 
+/// What to say when the folder's server is from another build of salash.
+pub fn other_version(inst: &Instance) -> anyhow::Error {
+    anyhow::anyhow!(
+        "salash in {} is another version than this one\nstop it with: kill $(cat {}), then start it again",
+        inst.folder.display(),
+        inst.lock_path().display()
+    )
+}
+
 /// Undo the terminal modes the client turned on, in reverse.
 fn restore(mouse: bool, keyboard: bool) {
     let mut out = std::io::stdout();
@@ -87,11 +96,7 @@ fn run(inst: &Instance, conn: Stream) -> Result<()> {
     // The server says how to set up the terminal before drawing anything.
     let mouse = match ServerMsg::read(&mut recv).context("talking to salash")? {
         Some(ServerMsg::Welcome { version, mouse }) if version == VERSION => mouse,
-        Some(ServerMsg::Welcome { .. }) => bail!(
-            "salash in {} is another version than this one\nstop it with: kill $(cat {}), then start it again",
-            inst.folder.display(),
-            inst.lock_path().display()
-        ),
+        Some(ServerMsg::Welcome { .. }) => return Err(other_version(inst)),
         Some(ServerMsg::Exit(why)) => bail!("{why}"),
         _ => bail!("salash sent something unexpected"),
     };
@@ -143,7 +148,7 @@ fn run(inst: &Instance, conn: Stream) -> Result<()> {
                 }
             }
             Ok(Some(ServerMsg::Exit(why))) => break why,
-            Ok(Some(ServerMsg::Welcome { .. })) => {}
+            Ok(Some(ServerMsg::Welcome { .. } | ServerMsg::Reply { .. })) => {}
             Ok(None) | Err(_) => break "salash stopped".into(),
         }
     };

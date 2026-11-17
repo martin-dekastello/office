@@ -51,6 +51,9 @@ pub struct Config {
     /// Pass a generated `--settings` file (status hooks) to claude, so they
     /// don't have to go into ~/.claude.
     pub inject_hooks: bool,
+    /// Give Claude tabs `salash mcp` (`claude --mcp-config`), so a session can
+    /// see salash's issues, tabs, their status and screens, and open tabs.
+    pub mcp: bool,
     /// Prefix key, tmux style: "ctrl-a", "ctrl-b", "ctrl-g", ...
     pub prefix: String,
     /// Prefix for locally created issues ("LOCAL-1").
@@ -88,6 +91,7 @@ impl Default for Config {
             shell_command: vec![],
             editor_command: vec![],
             inject_hooks: true,
+            mcp: true,
             prefix: "ctrl-a".into(),
             local_prefix: "LOCAL".into(),
             local_repo: None,
@@ -126,6 +130,7 @@ prefix = "ctrl-a"
 # shell_command  = []          # default: $SHELL / %COMSPEC%
 # editor_command = ["nvim"]    # default: $VISUAL / $EDITOR
 # inject_hooks = true          # status hooks via `claude --settings`
+# mcp = true                   # give Claude tabs `salash mcp`: issues, tabs, status, screens
 # local_prefix = "LOCAL"
 # local_repo = "/path/to/repo" # worktrees for local issues
 # bell = true
@@ -200,6 +205,11 @@ pub fn expand(p: &Path) -> PathBuf {
         }
     }
     p.to_path_buf()
+}
+
+/// A directory given by the user (`~` expanded), made absolute.
+pub fn dir_arg(d: &Path) -> Result<PathBuf> {
+    std::fs::canonicalize(expand(d)).with_context(|| format!("not a directory: {}", d.display()))
 }
 
 /// A path for display, with the home directory as "~".
