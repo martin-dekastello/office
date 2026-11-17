@@ -207,6 +207,11 @@ pub fn expand(p: &Path) -> PathBuf {
     p.to_path_buf()
 }
 
+/// A directory given by the user (`~` expanded), made absolute.
+pub fn dir_arg(d: &Path) -> Result<PathBuf> {
+    std::fs::canonicalize(expand(d)).with_context(|| format!("not a directory: {}", d.display()))
+}
+
 /// A path for display, with the home directory as "~".
 pub fn shorten(p: &Path) -> String {
     match dirs::home_dir().and_then(|h| p.strip_prefix(h).ok().map(Path::to_path_buf)) {

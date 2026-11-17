@@ -12,16 +12,23 @@ use crate::vault::Stage;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-/// Modes that would let a Claude session start another with fewer checks
-/// than its own. `salash tab new` allows them, as the user runs it; over MCP
-/// it would be Claude asking.
-const MODES_NOT_OVER_MCP: &[&str] = &["bypassPermissions", "dontAsk"];
+/// The only modes a Claude session may pick for a tab it opens over MCP: both
+/// ask before every edit, so the new session never has fewer checks than the
+/// one asking. With no mode the tab gets the user's own default. The others
+/// (`acceptEdits`, `auto`, `dontAsk`, `bypassPermissions`) are for the user,
+/// with `salash tab new`. An allow-list matched exactly, so anything it
+/// doesn't know is refused.
+pub const MODES_OVER_MCP: &[&str] = &["plan", "manual"];
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Query {
     /// Every issue, with its tabs.
     State,
+    /// One issue, with its tabs.
+    Issue(String),
+    /// One tab.
+    Tab(String),
     /// A tab's text: its last `lines` rows, reaching into scrollback if asked.
     Screen { tab: String, lines: usize, scrollback: bool },
     /// Open a tab, as `salash tab new` does.
@@ -32,6 +39,8 @@ pub enum Query {
 #[serde(rename_all = "snake_case")]
 pub enum Answer {
     State(State),
+    Issue(Box<Issue>),
+    Tab(Box<TabInfo>),
     /// Plain text, at most `term::MAX_TEXT` bytes.
     Screen(String),
     /// The tab has no process; this file holds its saved screen.
@@ -126,11 +135,18 @@ pub struct ClosedTab {
 pub fn answer(app: &mut App, q: Query) -> Answer {
     match q {
         Query::State => Answer::State(state(app)),
+        Query::Issue(id) => issue(app, &id).map_or_else(|| Answer::Error(format!("no issue {id}")), |i| Answer::Issue(Box::new(i))),
+        Query::Tab(id) => tab(app, &id).map_or_else(|| Answer::Error(format!("no tab {id}")), |t| Answer::Tab(Box::new(t))),
         Query::Screen { tab, lines, scrollback } => screen(app, &tab, lines, scrollback),
         Query::OpenTab(req) => {
-            if let Some(m) = req.mode.as_deref().filter(|m| MODES_NOT_OVER_MCP.contains(m)) {
+            if let Err(e) = req.check() {
+                return Answer::Error(format!("{e:#}"));
+            }
+            if let Some(m) = req.mode.as_deref().filter(|m| !MODES_OVER_MCP.contains(m)) {
                 return Answer::Error(format!(
-                    "mode {m} is not allowed over MCP; ask the user to run `salash tab new --mode {m}`"
+                    "mode {m} is not allowed over MCP (only {}, or none for the user's default); \
+                     ask the user to run `salash tab new --mode {m}`",
+                    MODES_OVER_MCP.join(", ")
                 ));
             }
             let reply = app.open_requested(req);
@@ -232,10 +248,15 @@ fn tabs_of(app: &App, id: &str) -> (Vec<TabInfo>, Vec<ClosedTab>, Option<PathBuf
 }
 
 fn state(app: &App) -> State {
-    let mut issues = vec![];
-    if app.saved_tabs(SCRATCH) > 0 {
-        let (tabs, closed, worktree, status) = tabs_of(app, SCRATCH);
-        issues.push(Issue {
+    let ids = (app.saved_tabs(SCRATCH) > 0).then_some(SCRATCH).into_iter().chain(app.notes.iter().map(|n| n.id.as_str()));
+    State { issues: ids.filter_map(|id| issue(app, id)).collect(), selected: app.selected.clone() }
+}
+
+/// An issue: one with a note, or Scratch while it has tabs.
+fn issue(app: &App, id: &str) -> Option<Issue> {
+    let (tabs, closed, worktree, status) = tabs_of(app, id);
+    if id == SCRATCH {
+        return (app.saved_tabs(SCRATCH) > 0).then(|| Issue {
             id: SCRATCH.into(),
             title: "Scratch".into(),
             stage: None,
@@ -251,25 +272,36 @@ fn state(app: &App) -> State {
             closed,
         });
     }
-    for n in &app.notes {
-        let (tabs, closed, worktree, status) = tabs_of(app, &n.id);
-        issues.push(Issue {
-            id: n.id.clone(),
-            title: n.title.clone(),
-            stage: Some(n.stage),
-            source: Some(n.source.clone()),
-            url: n.url.clone(),
-            repo: n.repo.clone(),
-            note: Some(n.path.clone()),
-            worktree,
-            created: n.created.clone(),
-            moved: n.moved.clone(),
-            status,
-            tabs,
-            closed,
-        });
+    let n = app.notes.iter().find(|n| n.id == id)?;
+    Some(Issue {
+        id: n.id.clone(),
+        title: n.title.clone(),
+        stage: Some(n.stage),
+        source: Some(n.source.clone()),
+        url: n.url.clone(),
+        repo: n.repo.clone(),
+        note: Some(n.path.clone()),
+        worktree,
+        created: n.created.clone(),
+        moved: n.moved.clone(),
+        status,
+        tabs,
+        closed,
+    })
+}
+
+/// One open tab, built without the rest of the state.
+fn tab(app: &App, id: &str) -> Option<TabInfo> {
+    for (issue, rt) in &app.rt {
+        if let Some(i) = rt.tabs.iter().position(|t| t.st.id == id) {
+            let visible = app.selected.as_deref() == Some(issue.as_str()) && i == rt.active;
+            return Some(tab_info(issue, &rt.tabs[i], rt, i == rt.active, visible));
+        }
     }
-    State { issues, selected: app.selected.clone() }
+    app.state.issues.iter().filter(|(issue, _)| !app.rt.contains_key(*issue)).find_map(|(issue, s)| {
+        let i = s.tabs.iter().position(|t| t.id == id)?;
+        Some(saved_tab_info(issue, &s.tabs[i], i == s.active_tab))
+    })
 }
 
 fn screen(app: &App, tab: &str, lines: usize, scrollback: bool) -> Answer {

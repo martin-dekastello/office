@@ -102,9 +102,11 @@ To undo it, quit salash, then move `<folder>/.salash/state.json` (with `snapshot
 - When the server quits, it saves the sessions as before, tells every client, removes the
   socket and stops the tabs.
 - **Queries.** `salash mcp` connects like a client but never sends its size, so it isn't
-  drawn for and gets no bell. It sends `Query` messages, which the main loop answers between
-  frames from the same channel as input, like a key press. Answers are built from memory and
-  the small hook status files. The server never replays a saved screen for a query: for a
+  drawn for. Once it sends a `Query` it is marked as asking and gets no broadcasts (the bell),
+  and its replies are never dropped: if its backlog is full it is cut off and reconnects. The
+  main loop answers queries between frames from the same channel as input, like a key press.
+  Answers are built from memory and the small hook status files, only for the issue or tab
+  asked about. The server never replays a saved screen for a query: for a
   suspended tab it answers with the snapshot's path, and `salash mcp` reads it. A screen query
   reads only the rows asked for, at most 2000. Measured round trips were about 0.2 ms.
 
@@ -116,7 +118,7 @@ Each frame is a tag byte, a big-endian `u32` length, then the payload. Frames ar
 | tag | direction | payload |
 |---|---|---|
 | 2 `Event` | client → server | a crossterm `Event` as JSON (key, mouse, paste, resize); the first is a `Resize` with the client's size |
-| 3 `Query` | client → server | `{"id", "body"}`: a question from `salash mcp` (`state`, `screen`, `open_tab`) as JSON |
+| 3 `Query` | client → server | `{"id", "body"}`: a question from `salash mcp` (`state`, `issue`, `tab`, `screen`, `open_tab`) as JSON |
 | 10 `Welcome` | server → client | capture the mouse or not (1 byte), protocol `VERSION` (1 byte) |
 | 11 `Output` | server → client | bytes to print |
 | 12 `Clipboard` | server → client | text to copy |

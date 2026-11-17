@@ -13,7 +13,9 @@ use crate::proto::{ClientMsg, ServerMsg, VERSION};
 use crate::query::{Answer, Issue, Query, TabInfo};
 use crate::server::Conn;
 use crate::state::TabKind;
+use crate::status::ClaudeStatus;
 use crate::term::Snapshot;
+use crate::vault::Stage;
 use anyhow::{bail, Context, Result};
 use interprocess::local_socket::prelude::*;
 use rmcp::handler::server::router::tool::ToolRouter;
@@ -36,6 +38,9 @@ use std::time::Duration;
 /// How long the server may take to answer. It answers between frames, so
 /// anything near this means it is stuck.
 const REPLY_TIMEOUT: Duration = Duration::from_secs(5);
+/// The same for opening a tab, which has a side effect: giving up early would
+/// let Claude retry while the first one still opens, and start two tabs.
+const OPEN_TIMEOUT: Duration = Duration::from_secs(60);
 /// Rows `read_screen` returns from scrollback when not told how many.
 const SCROLLBACK_LINES: usize = 200;
 /// Rows of a saved screen's last page, for `read_screen` of a suspended tab.
@@ -73,8 +78,15 @@ struct Link {
 
 impl Link {
     fn open(inst: &Instance) -> Result<Pipe> {
-        let stream = crate::client::connect(inst).map_err(|_| {
-            anyhow::anyhow!("no salash running for {}; start salash first", inst.folder.display())
+        let stream = crate::client::connect(inst).map_err(|e| {
+            let none = e
+                .downcast_ref::<std::io::Error>()
+                .is_some_and(|e| matches!(e.kind(), std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused));
+            if none {
+                anyhow::anyhow!("no salash running for {}; start salash first", inst.folder.display())
+            } else {
+                e.context(format!("connecting to salash for {}", inst.folder.display()))
+            }
         })?;
         stream.set_recv_timeout(Some(REPLY_TIMEOUT))?;
         let conn = Arc::new(stream);
@@ -107,7 +119,16 @@ impl Link {
 fn exchange(recv: &mut BufReader<Conn>, send: &mut BufWriter<Conn>, query: Query) -> Result<Answer, String> {
     static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
     let id = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let lost = |e: &dyn std::fmt::Display| format!("lost salash: {e}");
+    let opens = matches!(query, Query::OpenTab(_));
+    let timeout = if opens { OPEN_TIMEOUT } else { REPLY_TIMEOUT };
+    let lost = |e: &dyn std::fmt::Display| {
+        if opens {
+            format!("lost salash: {e}; the tab may still open, so check list_tabs before trying again")
+        } else {
+            format!("lost salash: {e}")
+        }
+    };
+    recv.get_ref().0.set_recv_timeout(Some(timeout)).map_err(|e| lost(&e))?;
     ClientMsg::Query { id, query }.write(send).map_err(|e| lost(&e))?;
     loop {
         match ServerMsg::read(recv) {
@@ -149,12 +170,27 @@ struct Salash {
     tool_router: ToolRouter<Salash>,
 }
 
-#[derive(Deserialize, JsonSchema)]
+#[derive(Deserialize, JsonSchema, Default)]
 struct ListIssues {
-    /// Only issues in this stage: todo, active, done or archive. Default: all but archive.
-    stage: Option<String>,
-    /// Only issues whose most urgent Claude tab has this status: attention, working, done, idle, starting.
-    status: Option<String>,
+    /// Only issues in this stage. Default: all but archive.
+    stage: Option<Stage>,
+    /// Only issues whose most urgent Claude tab has this status.
+    status: Option<ClaudeStatus>,
+}
+
+impl ListIssues {
+    /// The issues `list_issues` and `salash://issues` give, as summaries.
+    fn apply(&self, issues: &[Issue]) -> Vec<Value> {
+        issues
+            .iter()
+            .filter(|i| match self.stage {
+                Some(want) => i.stage == Some(want),
+                None => i.stage != Some(Stage::Archive),
+            })
+            .filter(|i| self.status.is_none_or(|want| i.status == Some(want)))
+            .map(summary)
+            .collect()
+    }
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -187,24 +223,16 @@ struct ReadScreen {
 }
 
 #[derive(Deserialize, JsonSchema)]
-#[serde(rename_all = "lowercase")]
-enum Kind {
-    Claude,
-    Shell,
-    Notes,
-}
-
-#[derive(Deserialize, JsonSchema)]
 struct OpenTab {
     /// Issue id, or "scratch" for no issue. Default: the caller's issue.
     issue: Option<String>,
     /// claude (default), shell, or notes (the issue's note in an editor).
-    kind: Option<Kind>,
+    kind: Option<TabKind>,
     /// Directory to start in. Default: the issue's worktree.
     cwd: Option<String>,
     /// Tab name (and Claude session name).
     name: Option<String>,
-    /// Claude permission mode for the first launch: plan, auto, acceptEdits or manual.
+    /// Claude permission mode for the first launch: plan or manual. Default: the user's own.
     mode: Option<String>,
     /// Claude only: the first prompt. The new session starts with no other context.
     prompt: Option<String>,
@@ -214,26 +242,36 @@ fn json(v: &impl serde::Serialize) -> String {
     serde_json::to_string_pretty(v).unwrap_or_default()
 }
 
-/// The branch checked out in a worktree.
+/// The branch checked out in a worktree, read from its HEAD rather than by
+/// running git, as a list asks for every issue's. In a linked worktree
+/// `.git` is a file naming its git dir. None when detached.
 fn branch(dir: &Path) -> Option<String> {
-    let out = std::process::Command::new("git")
-        .arg("-C")
-        .arg(dir)
-        .args(["branch", "--show-current"])
-        .stderr(std::process::Stdio::null())
-        .output()
-        .ok()?;
-    let b = String::from_utf8(out.stdout).ok()?.trim().to_string();
-    (out.status.success() && !b.is_empty()).then_some(b)
+    let git = dir.join(".git");
+    let gitdir = if git.is_file() {
+        let s = std::fs::read_to_string(&git).ok()?;
+        dir.join(s.strip_prefix("gitdir:")?.trim())
+    } else {
+        git
+    };
+    let head = std::fs::read_to_string(gitdir.join("HEAD")).ok()?;
+    head.trim().strip_prefix("ref: refs/heads/").map(String::from)
+}
+
+/// An issue as JSON, with its branch.
+fn with_branch(i: &Issue) -> Value {
+    let mut v = serde_json::to_value(i).unwrap_or_default();
+    if let Some(o) = v.as_object_mut() {
+        o.insert("branch".into(), i.worktree.as_deref().and_then(branch).into());
+    }
+    v
 }
 
 /// An issue as `list_issues` shows it: tabs counted, not listed.
 fn summary(i: &Issue) -> Value {
-    let mut v = serde_json::to_value(i).unwrap_or_default();
+    let mut v = with_branch(i);
     if let Some(o) = v.as_object_mut() {
         o.remove("closed");
         o.insert("tabs".into(), i.tabs.len().into());
-        o.insert("branch".into(), i.worktree.as_deref().and_then(branch).into());
     }
     v
 }
@@ -245,12 +283,14 @@ impl Salash {
         tokio::task::spawn_blocking(move || link.ask(q)).await.map_err(|e| e.to_string())?
     }
 
+    fn mark(&self, t: &mut TabInfo) {
+        t.own = self.me.tab.as_deref() == Some(t.id.as_str());
+    }
+
     async fn issues(&self) -> Result<Vec<Issue>, String> {
         match self.ask(Query::State).await? {
             Answer::State(mut s) => {
-                for t in s.issues.iter_mut().flat_map(|i| i.tabs.iter_mut()) {
-                    t.own = self.me.tab.as_deref() == Some(t.id.as_str());
-                }
+                s.issues.iter_mut().flat_map(|i| i.tabs.iter_mut()).for_each(|t| self.mark(t));
                 Ok(s.issues)
             }
             Answer::Error(e) => Err(e),
@@ -266,22 +306,26 @@ impl Salash {
         id.or_else(|| self.me.tab.clone()).ok_or_else(|| "not inside a salash tab: pass a tab id".into())
     }
 
-    async fn issue(&self, id: &str) -> Result<Value, String> {
-        let issue = self.issues().await?.into_iter().find(|i| i.id == id).ok_or_else(|| format!("no issue {id}"))?;
-        let mut v = serde_json::to_value(&issue).unwrap_or_default();
-        if let Some(o) = v.as_object_mut() {
-            o.insert("branch".into(), issue.worktree.as_deref().and_then(branch).into());
+    async fn issue(&self, id: &str) -> Result<Issue, String> {
+        match self.ask(Query::Issue(id.to_string())).await? {
+            Answer::Issue(mut i) => {
+                i.tabs.iter_mut().for_each(|t| self.mark(t));
+                Ok(*i)
+            }
+            Answer::Error(e) => Err(e),
+            _ => Err("salash answered something else".into()),
         }
-        Ok(v)
     }
 
     async fn tab(&self, id: &str) -> Result<TabInfo, String> {
-        self.issues()
-            .await?
-            .into_iter()
-            .flat_map(|i| i.tabs)
-            .find(|t| t.id == id)
-            .ok_or_else(|| format!("no tab {id}"))
+        match self.ask(Query::Tab(id.to_string())).await? {
+            Answer::Tab(mut t) => {
+                self.mark(&mut t);
+                Ok(*t)
+            }
+            Answer::Error(e) => Err(e),
+            _ => Err("salash answered something else".into()),
+        }
     }
 
     async fn screen(&self, tab: &str, lines: Option<usize>, scrollback: bool) -> Result<String, String> {
@@ -316,23 +360,7 @@ impl Salash {
         annotations(read_only_hint = true)
     )]
     async fn list_issues(&self, Parameters(p): Parameters<ListIssues>) -> Result<String, String> {
-        let issues = self.issues().await?;
-        let status = p.status.map(|s| s.to_lowercase());
-        let v: Vec<Value> = issues
-            .iter()
-            .filter(|i| match (&p.stage, i.stage) {
-                (Some(want), Some(st)) => st.dir() == want.to_lowercase(),
-                (Some(_), None) => false,
-                (None, st) => st != Some(crate::vault::Stage::Archive),
-            })
-            .filter(|i| {
-                status.as_ref().is_none_or(|want| {
-                    i.status.is_some_and(|s| serde_json::to_value(s).ok().and_then(|v| v.as_str().map(String::from)).as_ref() == Some(want))
-                })
-            })
-            .map(summary)
-            .collect();
-        Ok(json(&v))
+        Ok(json(&p.apply(&self.issues().await?)))
     }
 
     #[tool(
@@ -341,7 +369,7 @@ impl Salash {
     )]
     async fn get_issue(&self, Parameters(p): Parameters<IssueId>) -> Result<String, String> {
         let id = self.issue_or_mine(p.id)?;
-        Ok(json(&self.issue(&id).await?))
+        Ok(json(&with_branch(&self.issue(&id).await?)))
     }
 
     #[tool(
@@ -349,14 +377,9 @@ impl Salash {
         annotations(read_only_hint = true)
     )]
     async fn list_tabs(&self, Parameters(p): Parameters<ListTabs>) -> Result<String, String> {
-        let issues = self.issues().await?;
-        let tabs: Vec<&TabInfo> = match p.issue.as_deref() {
-            Some("all") => issues.iter().flat_map(|i| &i.tabs).collect(),
-            _ => {
-                let id = self.issue_or_mine(p.issue)?;
-                let i = issues.iter().find(|i| i.id == id).ok_or_else(|| format!("no issue {id}"))?;
-                i.tabs.iter().collect()
-            }
+        let tabs: Vec<TabInfo> = match p.issue.as_deref() {
+            Some("all") => self.issues().await?.into_iter().flat_map(|i| i.tabs).collect(),
+            _ => self.issue(&self.issue_or_mine(p.issue)?).await?.tabs,
         };
         Ok(json(&tabs))
     }
@@ -377,22 +400,13 @@ impl Salash {
     }
 
     #[tool(
-        description = "Open a new tab in salash, in the background, like `salash tab new`: a Claude session (optionally with a permission mode and a first prompt), a shell, or the issue's note. Modes bypassPermissions and dontAsk are refused here. Returns the new tab's id.",
+        description = "Open a new tab in salash, in the background, like `salash tab new`: a Claude session (optionally with a permission mode and a first prompt), a shell, or the issue's note. Only modes plan and manual are allowed here; others are for the user (`salash tab new`). Returns the new tab's id.",
         annotations(read_only_hint = false, destructive_hint = false)
     )]
     async fn open_tab(&self, Parameters(p): Parameters<OpenTab>) -> Result<String, String> {
         let issue = self.issue_or_mine(p.issue)?;
-        let cwd = p
-            .cwd
-            .map(|d| {
-                std::fs::canonicalize(crate::config::expand(Path::new(&d))).map_err(|_| format!("not a directory: {d}"))
-            })
-            .transpose()?;
-        let kind = match p.kind.unwrap_or(Kind::Claude) {
-            Kind::Claude => TabKind::Claude,
-            Kind::Shell => TabKind::Shell,
-            Kind::Notes => TabKind::Notes,
-        };
+        let cwd = p.cwd.map(|d| crate::config::dir_arg(Path::new(&d)).map_err(|e| format!("{e:#}"))).transpose()?;
+        let kind = p.kind.unwrap_or(TabKind::Claude);
         let req = Request { issue: issue.clone(), kind, cwd, name: p.name, mode: p.mode, prompt: p.prompt };
         match self.ask(Query::OpenTab(req)).await? {
             Answer::Opened(tab) => Ok(json(&serde_json::json!({ "tab": tab, "issue": issue }))),
@@ -423,7 +437,7 @@ impl ServerHandler for Salash {
     ) -> Result<ListResourcesResult, ErrorData> {
         let issues = self.issues().await.map_err(|e| ErrorData::internal_error(e, None))?;
         let mut all = vec![Resource::new(ISSUES_URI, "issues")
-            .with_description("Every issue, as list_issues gives it")
+            .with_description("Every issue but archived ones, as list_issues gives it")
             .with_mime_type("application/json")];
         for i in issues.iter().filter(|i| !i.tabs.is_empty()) {
             all.push(
@@ -458,9 +472,9 @@ impl ServerHandler for Salash {
         let uri = req.uri;
         let (text, mime) = if uri == ISSUES_URI {
             let issues = self.issues().await.map_err(resource_error)?;
-            (json(&issues.iter().map(summary).collect::<Vec<_>>()), "application/json")
+            (json(&ListIssues::default().apply(&issues)), "application/json")
         } else if let Some(id) = uri.strip_prefix("salash://issue/") {
-            (json(&self.issue(id).await.map_err(resource_error)?), "application/json")
+            (json(&with_branch(&self.issue(id).await.map_err(resource_error)?)), "application/json")
         } else if let Some(id) = uri.strip_prefix("salash://tab/").and_then(|r| r.strip_suffix("/screen")) {
             (self.screen(id, None, false).await.map_err(resource_error)?, "text/plain")
         } else if let Some(id) = uri.strip_prefix("salash://tab/") {

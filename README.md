@@ -278,9 +278,9 @@ The same comes as resources: `salash://issues`, `salash://issue/{id}`, `salash:/
 caller's own, and the caller's tab is marked `"self": true`.
 
 Any Claude in a salash tab can read **every** tab's screen this way, in every issue: the same
-as anyone who can attach to salash. If that's too much, set `mcp = false`. `open_tab` refuses
-the modes `bypassPermissions` and `dontAsk`, so a session can't start another with fewer
-checks than its own. Run `salash tab new --mode …` yourself for those.
+as anyone who can attach to salash. If that's too much, set `mcp = false`. `open_tab` takes
+only the modes `plan` and `manual`, or none for your default, so a session can't start another
+with fewer checks than its own. Run `salash tab new --mode …` yourself for the others.
 
 ## CLI
 

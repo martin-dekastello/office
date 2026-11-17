@@ -10,8 +10,9 @@ use serde_json::{json, Value};
 use std::io::Read;
 use std::path::PathBuf;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, rmcp::schemars::JsonSchema)]
 #[serde(rename_all = "lowercase")]
+#[schemars(crate = "rmcp::schemars")]
 pub enum ClaudeStatus {
     /// Process started, no hook seen yet.
     Starting,

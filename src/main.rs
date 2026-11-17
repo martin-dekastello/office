@@ -85,7 +85,7 @@ enum TabCmd {
         #[arg(long)]
         issue: Option<String>,
         #[arg(long, value_enum, default_value = "claude")]
-        kind: TabKindArg,
+        kind: state::TabKind,
         /// Directory to start in; defaults to the issue's worktree.
         #[arg(long)]
         cwd: Option<std::path::PathBuf>,
@@ -103,13 +103,6 @@ enum TabCmd {
         #[arg(long)]
         folder: Option<PathBuf>,
     },
-}
-
-#[derive(Clone, Copy, clap::ValueEnum)]
-enum TabKindArg {
-    Claude,
-    Shell,
-    Notes,
 }
 
 const SKILL: &str = include_str!("../skills/new-salash-tab/SKILL.md");
@@ -205,17 +198,10 @@ fn main() -> Result<()> {
             let issue = issue
                 .or_else(|| std::env::var("SALASH_ISSUE").ok())
                 .context("not inside a salash tab: pass --issue")?;
-            let cwd = cwd
-                .map(|d| std::fs::canonicalize(config::expand(&d)).with_context(|| format!("not a directory: {}", d.display())))
-                .transpose()?;
+            let cwd = cwd.as_deref().map(config::dir_arg).transpose()?;
             let prompt = prompt_file
                 .map(|f| std::fs::read_to_string(&f).with_context(|| format!("reading {}", f.display())))
                 .transpose()?;
-            let kind = match kind {
-                TabKindArg::Claude => state::TabKind::Claude,
-                TabKindArg::Shell => state::TabKind::Shell,
-                TabKindArg::Notes => state::TabKind::Notes,
-            };
             let req = api::Request { issue: issue.clone(), kind, cwd, name, mode, prompt };
             let reply = api::submit(&req)?;
             if !reply.ok {

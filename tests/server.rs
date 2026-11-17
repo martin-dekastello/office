@@ -289,8 +289,8 @@ impl Mcp {
         writeln!(self.stdin, "{}", serde_json::json!({ "jsonrpc": "2.0", "method": method })).unwrap();
     }
 
-    /// The result of a request; panics on a JSON-RPC error.
-    fn call(&mut self, method: &str, params: serde_json::Value) -> serde_json::Value {
+    /// The whole response to a request, result or error.
+    fn request(&mut self, method: &str, params: serde_json::Value) -> serde_json::Value {
         self.next += 1;
         let id = self.next;
         let req = serde_json::json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params });
@@ -298,10 +298,22 @@ impl Mcp {
         loop {
             let m = self.lines.recv_timeout(Duration::from_secs(10)).expect("no answer from salash mcp");
             if m["id"] == id {
-                assert!(m.get("error").is_none(), "{method}: {m}");
-                return m["result"].clone();
+                return m;
             }
         }
+    }
+
+    /// The result of a request; panics on a JSON-RPC error.
+    fn call(&mut self, method: &str, params: serde_json::Value) -> serde_json::Value {
+        let m = self.request(method, params);
+        assert!(m.get("error").is_none(), "{method}: {m}");
+        m["result"].clone()
+    }
+
+    /// Whether a tool call is refused, as a JSON-RPC error or an error result.
+    fn refused(&mut self, name: &str, args: serde_json::Value) -> bool {
+        let m = self.request("tools/call", serde_json::json!({ "name": name, "arguments": args }));
+        m.get("error").is_some() || m["result"]["isError"] == true
     }
 
     /// A tool's text, and whether it is an error.
@@ -428,7 +440,7 @@ fn mcp_answers_from_the_running_server() {
     // The same checks as `salash tab new`, and modes Claude may not choose for itself.
     let (e, err) = m.tool("open_tab", serde_json::json!({ "issue": "scratch", "mode": "yolo" }));
     assert!(err && e.contains("unknown mode"), "{e}");
-    for mode in ["bypassPermissions", "dontAsk"] {
+    for mode in ["bypassPermissions", "dontAsk", "acceptEdits", "auto"] {
         let (e, err) = m.tool("open_tab", serde_json::json!({ "issue": "scratch", "mode": mode }));
         assert!(err && e.contains("not allowed over MCP") && e.contains("salash tab new --mode"), "{e}");
     }
@@ -473,4 +485,73 @@ fn mcp_false_leaves_claude_without_it() {
     let argv = eventually(|| std::fs::read_to_string(env.folder.join("argv.txt")).ok().filter(|a| a.contains("go")));
     assert!(!argv.contains("--mcp-config"), "{argv}");
     assert!(!env.folder.join(".salash/claude-mcp.json").exists());
+}
+
+#[test]
+fn mcp_filters_issues_reads_scrollback_and_survives_a_restart() {
+    let shell = r#"shell_command = ["sh", "-c", 'i=0; while [ $i -lt 100 ]; do echo "line $i"; i=$((i+1)); done; exec cat']"#;
+    let env = Env::with(&format!("{shell}\n"));
+    let issues = env.root.join("vault/Issues");
+    for (stage, id) in [("todo", "TS-1"), ("archive", "TS-2")] {
+        std::fs::create_dir_all(issues.join(stage)).unwrap();
+        std::fs::write(issues.join(format!("{stage}/{id}.md")), format!("---\nid: {id}\n---\n# Issue {id}\n")).unwrap();
+    }
+    // TS-1's worktree is a linked one: `.git` is a file naming its git dir.
+    let wt = env.root.join("wt/TS-1");
+    std::fs::create_dir_all(env.root.join("gitdir")).unwrap();
+    std::fs::create_dir_all(&wt).unwrap();
+    std::fs::write(wt.join(".git"), format!("gitdir: {}\n", env.root.join("gitdir").display())).unwrap();
+    std::fs::write(env.root.join("gitdir/HEAD"), "ref: refs/heads/feat/ts-1\n").unwrap();
+    let dir = env.folder.join(".salash");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("state.json"), format!(r#"{{"issues":{{"TS-1":{{"worktree":{wt:?},"tabs":[]}}}}}}"#)).unwrap();
+    let server = Stop(env.server());
+    env.connect();
+    let mut m = Mcp::start(env.cmd(), &env.folder);
+
+    // Archived issues only when asked for; the branch comes from the worktree.
+    let all = m.ok("list_issues", serde_json::json!({}));
+    assert_eq!(all.as_array().unwrap().len(), 1, "{all}");
+    assert_eq!(all[0]["id"], "TS-1");
+    assert_eq!(all[0]["branch"], "feat/ts-1");
+    let archived = m.ok("list_issues", serde_json::json!({ "stage": "archive" }));
+    assert_eq!(archived[0]["id"], "TS-2", "{archived}");
+    assert_eq!(m.ok("list_issues", serde_json::json!({ "status": "attention" })), serde_json::json!([]));
+    // A misspelt filter is an error, not an empty list.
+    assert!(m.refused("list_issues", serde_json::json!({ "stage": "archived" })));
+    assert!(m.refused("list_issues", serde_json::json!({ "status": "needs-you" })));
+    let read = m.call("resources/read", serde_json::json!({ "uri": "salash://issues" }));
+    let listed: serde_json::Value = serde_json::from_str(read["contents"][0]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(listed, all, "the resource matches list_issues");
+    let templates = m.call("resources/templates/list", serde_json::json!({}));
+    assert_eq!(templates["resourceTemplates"].as_array().unwrap().len(), 3, "{templates}");
+
+    // A shell tab with more output than its screen holds.
+    let tab = m.ok("open_tab", serde_json::json!({ "issue": "TS-1", "kind": "shell" }))["tab"].as_str().unwrap().to_string();
+    eventually(|| m.tool("read_screen", serde_json::json!({ "tab": tab })).0.contains("line 99").then_some(()));
+    let last = m.ok("read_screen", serde_json::json!({ "tab": tab, "lines": 5, "scrollback": true }));
+    assert_eq!(last, "line 95\nline 96\nline 97\nline 98\nline 99\n", "as many rows as asked");
+    let back = m.ok("read_screen", serde_json::json!({ "tab": tab, "scrollback": true }));
+    assert!(back.as_str().unwrap().starts_with("line 0\n"), "{back}");
+    let screen = m.ok("read_screen", serde_json::json!({ "tab": tab }));
+    assert!(!screen.as_str().unwrap().contains("line 0\n"), "{screen}");
+
+    let tabs = m.ok("list_tabs", serde_json::json!({ "issue": "all" }));
+    assert_eq!(tabs[0]["id"], tab.as_str(), "{tabs}");
+    let read = m.call("resources/read", serde_json::json!({ "uri": format!("salash://tab/{tab}") }));
+    assert!(read["contents"][0]["text"].as_str().unwrap().contains(&tab), "{read}");
+    let read = m.call("resources/read", serde_json::json!({ "uri": "salash://issue/TS-1" }));
+    let issue: serde_json::Value = serde_json::from_str(read["contents"][0]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(issue["branch"], "feat/ts-1");
+    assert_eq!(issue["tabs"][0]["id"], tab.as_str());
+
+    // salash restarts: the same `salash mcp` connects to the new one.
+    drop(server);
+    let _server = Stop(env.server());
+    env.connect();
+    let again = eventually(|| {
+        let (t, err) = m.tool("list_issues", serde_json::json!({}));
+        (!err).then_some(t)
+    });
+    assert!(again.contains("TS-1"), "{again}");
 }
