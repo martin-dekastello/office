@@ -3,7 +3,7 @@ name = "salash"
 version = "0.0.2"
 edition = "2024"
 license = "GPL-3.0-or-later"
-repository = "https://github.com/martin-dekastello/office"
+repository = "https://github.com/martin-dekastello/salash"
 
 [dependencies]
 anyhow = "1.0.104"
@@ -23,7 +23,7 @@ rpassword = "7.5.5"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 terminal-light = "1.9.1"
-tokio = { version = "1", features = ["rt"] }
+tokio = { version = "1", features = ["rt", "sync", "macros"] }
 toml = "1.2.1"
 tui-term = "0.3.4"
 ureq = { version = "3.5.1", features = ["json"] }

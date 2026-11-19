@@ -2712,4 +2712,36 @@ mod tests {
         press(&mut app, KeyCode::Char('y'), KeyModifiers::NONE);
         assert!(app.msg.as_ref().is_none_or(|m| !m.0.starts_with("Sidebar")));
     }
+
+    #[test]
+    fn change_notifications_follow_status_not_hook_noise() {
+        use crate::query::{diff, fingerprints};
+        let (mut app, _vault) = click_app(&["A-1"]);
+        let base = fingerprints(&app);
+        assert!(base.listed.is_empty(), "an issue without tabs isn't listed");
+        with_tabs(&mut app, "A-1", vec![unstarted_tab()], 0);
+        let opened = fingerprints(&app);
+        let d = diff(&base, &opened);
+        assert!(d.list, "{d:?}");
+        assert_eq!(d.uris, ["salash://issue/A-1", "salash://issues", "salash://tab/t"]);
+        assert!(diff(&opened, &fingerprints(&app)).uris.is_empty(), "nothing changed");
+
+        // Looking at a tab or a hook's message doesn't notify; its status does.
+        app.rt.get_mut("A-1").unwrap().tabs[0].seen_ts = 99;
+        assert_eq!(fingerprints(&app), opened);
+        app.rt.get_mut("A-1").unwrap().tabs[0].status = ClaudeStatus::Working;
+        let d = diff(&opened, &fingerprints(&app));
+        assert_eq!((d.uris.as_slice(), d.list), (["salash://tab/t".to_string()].as_slice(), false));
+
+        // A title change is the issue's and the list's, not its tabs'.
+        let working = fingerprints(&app);
+        app.notes[0].title = "renamed".into();
+        assert_eq!(diff(&working, &fingerprints(&app)).uris, ["salash://issue/A-1", "salash://issues"]);
+
+        // The last tab closing: its URI goes and the issue leaves the list.
+        let renamed = fingerprints(&app);
+        app.rt.get_mut("A-1").unwrap().tabs.clear();
+        let d = diff(&renamed, &fingerprints(&app));
+        assert!(d.list && d.uris.contains(&"salash://tab/t".to_string()), "{d:?}");
+    }
 }

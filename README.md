@@ -65,7 +65,7 @@ The name comes from the Slovak word *salaš*, a shepherd's hut up in the mountai
 ## Install
 
 Download the binary for your platform from
-[Releases](https://github.com/martin-dekastello/office/releases): macOS (Apple silicon),
+[Releases](https://github.com/martin-dekastello/salash/releases): macOS (Apple silicon),
 Linux arm64 or Linux x86_64. The Linux builds are static (musl), so they run on any distro.
 
 ```sh
@@ -351,14 +351,18 @@ one given with `--folder`.
 salash's own skills come as a Claude Code plugin named `salash`, built into the binary. Every
 time it starts, salash writes it to `<data>/plugin`, so it always matches the salash you have,
 and its Claude tabs load it with `--plugin-dir`. There is nothing to install, and Claude
-sessions outside salash never see it. In a Claude tab, `/salash:new-salash-tab plan <task>`
-writes a handoff brief from the conversation and opens a new Claude tab in the same issue,
-started in that mode with the brief as its first prompt. It's like `/new-claude-tmux`, but
-without tmux. Loading a plugin with `--plugin-dir` needs Claude Code 2.1.74 or later.
+sessions outside salash never see it. In a Claude tab, `/salash:new-tab plan <request>`
+turns the request into a self-contained handoff brief, with the context it needs from the
+conversation, and opens a new Claude tab in the same issue, started in that mode with the
+brief as its first prompt. It's like `/new-claude-tmux`, but without tmux. Loading a plugin
+with `--plugin-dir` needs Claude Code 2.1.74 or later. The skill used to be called
+`/salash:new-salash-tab`; it is now `/salash:new-tab`.
 
-Older salash versions had `salash install-skill`. If you ran it, you can delete
-`~/.claude/skills/new-salash-tab`: until you do, the old copy shows up as `/new-salash-tab`
-next to `/salash:new-salash-tab`, and it doesn't change when salash is upgraded.
+Older salash versions had `salash install-skill`. If you ran it, delete
+`~/.claude/skills/new-salash-tab`. Until you do, the old copy shows up as `/new-salash-tab`
+next to `/salash:new-tab` and doesn't change when salash is upgraded. It also works the old
+way, pasting your request into the brief word for word, and since it answers to the same
+phrases, Claude may pick it instead of `/salash:new-tab`.
 
 ## Claude sees salash (MCP)
 
@@ -385,6 +389,12 @@ claude mcp add salash -- salash mcp ~/work
 The same comes as resources: `salash://issues`, `salash://issue/{id}`, `salash://tab/{id}` and
 `salash://tab/{id}/screen`. Inside a salash tab, tools without an issue or tab default to the
 caller's own, and the caller's tab is marked `"self": true`.
+
+A client can subscribe to those resources, with `subscriptions/listen` (MCP 2026-07-28) or
+`resources/subscribe` (2025-11-25), and is told within about a quarter of a second when a tab's
+status changes (working, needs attention, done, exited), a tab opens, closes or is suspended,
+or an issue changes stage or title. It also gets `list_changed` when issues come or go. Screens
+can't be subscribed to, and hook messages alone don't notify. Claude Code doesn't subscribe yet.
 
 Any Claude in a salash tab can read **every** tab's screen this way, in every issue: the same
 as anyone who can attach to salash. If that's too much, set `mcp = false`. `open_tab` takes
