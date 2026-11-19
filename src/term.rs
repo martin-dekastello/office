@@ -534,6 +534,37 @@ impl Pane {
     pub fn kill(&mut self) {
         let _ = self.child.kill();
     }
+
+    /// The process group in the terminal's foreground, unless it's the child's
+    /// own: a shell at its prompt, even with a job in the background, is idle.
+    /// tmux reads `pane_current_command` the same way, with `tcgetpgrp` on the
+    /// master side (`osdep_get_name` in osdep-darwin.c and osdep-linux.c).
+    pub fn foreground_pid(&self) -> Option<i32> {
+        if self.exited.is_some() {
+            return None;
+        }
+        let fg = self.master.process_group_leader()?;
+        (fg > 0 && Some(fg as u32) != self.child.process_id()).then_some(fg as i32)
+    }
+}
+
+/// A process's short name, as `ps -o comm` shows it, if it can be read.
+pub fn process_name(pid: i32) -> Option<String> {
+    #[cfg(target_os = "macos")]
+    let name = {
+        let mut buf = [0u8; 256];
+        // SAFETY: proc_name writes at most `buf.len()` bytes and returns how many.
+        let n = unsafe { libc::proc_name(pid, buf.as_mut_ptr().cast(), buf.len() as u32) };
+        (n > 0).then(|| String::from_utf8_lossy(&buf[..n as usize]).into_owned())
+    };
+    #[cfg(target_os = "linux")]
+    let name = std::fs::read_to_string(format!("/proc/{pid}/comm")).ok();
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    let name: Option<String> = {
+        let _ = pid;
+        None
+    };
+    name.map(|n| n.trim().to_string()).filter(|n| !n.is_empty())
 }
 
 impl Drop for Pane {
@@ -662,6 +693,33 @@ mod tests {
         r.pane.select_start(0, 0);
         r.pane.resize(6, 40);
         assert!(r.pane.selection.is_none());
+    }
+
+    #[test]
+    fn a_shell_is_busy_only_while_a_command_runs_in_front() {
+        let argv = ["sh".to_string(), "-i".to_string()];
+        let env = [("PS1".to_string(), "prompt> ".to_string()), ("ENV".to_string(), "/dev/null".to_string())];
+        let mut pane = Pane::spawn(&argv, &std::env::temp_dir(), &env, 10, 60).unwrap();
+        wait_until(|| pane.parser.lock().unwrap().screen().contents().contains("prompt>"));
+        assert_eq!(pane.foreground_pid(), None, "at its prompt");
+        pane.write(b"sleep 31 &\r");
+        std::thread::sleep(Duration::from_millis(300));
+        assert_eq!(pane.foreground_pid(), None, "a background job keeps it idle");
+        pane.write(b"sleep 30\r");
+        wait_until(|| pane.foreground_pid().is_some());
+        let pid = pane.foreground_pid().unwrap();
+        assert_eq!(process_name(pid).as_deref(), Some("sleep"));
+        pane.write(b"\x03");
+        wait_until(|| pane.foreground_pid().is_none());
+        pane.write(b"kill %1\r");
+    }
+
+    #[test]
+    fn an_exited_pane_has_no_foreground_command() {
+        let argv = ["sh".to_string(), "-c".to_string(), "true".to_string()];
+        let mut pane = Pane::spawn(&argv, &std::env::temp_dir(), &[], 5, 40).unwrap();
+        wait_until(|| pane.poll_exit());
+        assert_eq!(pane.foreground_pid(), None);
     }
 
     #[test]
