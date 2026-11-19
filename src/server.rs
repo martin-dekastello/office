@@ -9,7 +9,8 @@
 use crate::app::App;
 use crate::config::{self, Config};
 use crate::instance::{self, Instance};
-use crate::proto::{ClientMsg, ServerMsg};
+use crate::proto::{Changed, ClientMsg, ServerMsg};
+use crate::query::{self, Fingerprints};
 use anyhow::{Context, Result};
 use crossterm::event::Event;
 use interprocess::local_socket::{prelude::*, ListenerOptions};
@@ -29,6 +30,8 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 const FRAME: Duration = Duration::from_millis(33);
+/// How often to look for changes to tell `salash mcp`, while one listens.
+const WATCH: Duration = Duration::from_millis(250);
 /// How many messages a client may fall behind by. Past that its output is
 /// dropped and it gets a full redraw once it catches up, so a slow link
 /// never holds up the others.
@@ -41,7 +44,7 @@ const LOCK_WAIT: Duration = Duration::from_secs(3);
 const CLEAR: &[u8] = b"\x1b[0m\x1b[H\x1b[2J";
 
 enum Incoming {
-    Connected(u64, SyncSender<ServerMsg>, JoinHandle<()>),
+    Connected(u64, SyncSender<ServerMsg>, JoinHandle<()>, Arc<AtomicBool>),
     Msg(u64, ClientMsg),
     Gone(u64),
 }
@@ -76,6 +79,13 @@ struct Client {
     size: Option<(u16, u16)>,
     /// It asked a `Query`: `salash mcp`, not a terminal. It gets replies only.
     asks: bool,
+    /// It sent `Subscribe`, so it is told what changes.
+    watches: bool,
+    /// Changes not sent yet, as one `Changed` is still on its way: a slow
+    /// reader gets them merged into the next rather than a growing queue.
+    pending: Changed,
+    /// Set while a `Changed` waits in its queue; its writer clears it.
+    queued: Arc<AtomicBool>,
     /// What its screen shows, for the diff. None means it needs a full redraw.
     term: Option<ClientTerm>,
     sink: Sink,
@@ -100,6 +110,31 @@ impl Client {
         self.out.try_send(m).is_ok()
     }
 
+    /// Add changes to tell it, and send them unless one `Changed` is still
+    /// queued. False if the client is gone.
+    fn notify(&mut self, c: &Changed) -> bool {
+        let p = &mut self.pending;
+        for u in &c.uris {
+            if !p.uris.contains(u) {
+                p.uris.push(u.clone());
+            }
+        }
+        p.list |= c.list;
+        if (p.uris.is_empty() && !p.list) || self.queued.load(Ordering::Acquire) {
+            return true;
+        }
+        self.queued.store(true, Ordering::Release);
+        match self.out.try_send(ServerMsg::Changed(std::mem::take(&mut self.pending))) {
+            Ok(()) => true,
+            Err(TrySendError::Full(ServerMsg::Changed(c))) => {
+                self.queued.store(false, Ordering::Release);
+                self.pending = c;
+                true
+            }
+            Err(_) => false,
+        }
+    }
+
     /// Send its last message, waiting behind a full backlog rather than
     /// dropping it. Its writer ends once that is out; here is its handle.
     fn last(self, m: ServerMsg) -> JoinHandle<()> {
@@ -116,6 +151,9 @@ struct Server {
     /// The UI drawn once per frame at the shared size.
     shared: Option<Terminal<TestBackend>>,
     mouse: bool,
+    /// What the last look for changes saw, while anyone watches.
+    prints: Option<Fingerprints>,
+    watched: Instant,
 }
 
 /// `salash server <folder>`: run in the background until quit.
@@ -143,12 +181,13 @@ pub fn run(inst: Instance) -> Result<()> {
     let stop = stop_on_signal();
     eprintln!("salash serving {}", inst.folder.display());
 
-    let mut srv = Server { clients: BTreeMap::new(), shared: None, mouse };
+    let mut srv = Server { clients: BTreeMap::new(), shared: None, mouse, prints: None, watched: Instant::now() };
     while !app.quit && !stop.load(Ordering::Relaxed) {
         app.tick();
         app.sync_viewer();
         srv.render(&mut app);
         app.resize_visible();
+        srv.watch(&app);
         if app.take_bell() {
             srv.broadcast(ServerMsg::Output(b"\x07".to_vec()));
         }
@@ -289,15 +328,20 @@ fn serve(id: u64, conn: interprocess::local_socket::Stream, tx: &Sender<Incoming
     let conn = Arc::new(conn);
     let (recv, send) = (Conn(conn.clone()), Conn(conn));
     let (out, orx) = mpsc::sync_channel::<ServerMsg>(BACKLOG);
+    let queued = Arc::new(AtomicBool::new(false));
+    let sent = queued.clone();
     let writer = std::thread::spawn(move || {
         let mut send = BufWriter::new(send);
         for m in orx {
+            if matches!(m, ServerMsg::Changed(_)) {
+                sent.store(false, Ordering::Release);
+            }
             if m.write(&mut send).is_err() {
                 break;
             }
         }
     });
-    if tx.send(Incoming::Connected(id, out, writer)).is_err() {
+    if tx.send(Incoming::Connected(id, out, writer, queued)).is_err() {
         return false;
     }
     let tx = tx.clone();
@@ -337,8 +381,18 @@ fn shared_size(sizes: impl Iterator<Item = (u16, u16)>) -> Option<(u16, u16)> {
 impl Server {
     fn on(&mut self, m: Incoming, app: &mut App) {
         match m {
-            Incoming::Connected(id, out, writer) => {
-                let mut c = Client { out, writer, size: None, asks: false, term: None, sink: Sink::default() };
+            Incoming::Connected(id, out, writer, queued) => {
+                let mut c = Client {
+                    out,
+                    writer,
+                    size: None,
+                    asks: false,
+                    watches: false,
+                    pending: Changed::default(),
+                    queued,
+                    term: None,
+                    sink: Sink::default(),
+                };
                 if c.send(ServerMsg::Welcome { version: crate::proto::VERSION, mouse: self.mouse }) {
                     self.clients.insert(id, c);
                 }
@@ -380,11 +434,36 @@ impl Server {
                     self.clients.remove(&id);
                 }
             }
-            Incoming::Msg(_, ClientMsg::Subscribe) => {}
+            Incoming::Msg(id, ClientMsg::Subscribe) => {
+                if let Some(c) = self.clients.get_mut(&id) {
+                    c.asks = true;
+                    c.watches = true;
+                }
+            }
             Incoming::Gone(id) => {
                 self.clients.remove(&id);
             }
         }
+    }
+
+    /// Every `WATCH`, while anyone watches, tell the watchers what changed
+    /// since the last look. A watcher's first look is only the baseline.
+    fn watch(&mut self, app: &App) {
+        if !self.clients.values().any(|c| c.watches) {
+            self.prints = None;
+            return;
+        }
+        if self.prints.is_some() && self.watched.elapsed() < WATCH {
+            return;
+        }
+        self.watched = Instant::now();
+        let now = query::fingerprints(app);
+        let changed = match &self.prints {
+            Some(old) => query::diff(old, &now),
+            None => Changed::default(),
+        };
+        self.prints = Some(now);
+        self.clients.retain(|_, c| !c.watches || c.notify(&changed));
     }
 
     /// Send to every terminal, not to `salash mcp`: output it never reads
@@ -517,5 +596,45 @@ mod tests {
         // Nothing changed, so nothing more to send.
         t.draw(|f| paint(f.buffer_mut(), &view)).unwrap();
         assert!(!String::from_utf8_lossy(&sink.take()).contains('x'));
+    }
+
+    #[test]
+    fn a_slow_watcher_gets_one_changed_at_a_time_with_changes_merged() {
+        let (out, rx) = mpsc::sync_channel(BACKLOG);
+        let queued = Arc::new(AtomicBool::new(false));
+        let mut c = Client {
+            out,
+            writer: std::thread::spawn(|| {}),
+            size: None,
+            asks: true,
+            watches: true,
+            pending: Changed::default(),
+            queued: queued.clone(),
+            term: None,
+            sink: Sink::default(),
+        };
+        let one = |u: &str| Changed { uris: vec![u.into()], list: false };
+        assert!(c.notify(&Changed::default()));
+        assert!(rx.try_recv().is_err(), "nothing to tell");
+        assert!(c.notify(&one("a")));
+        // Not read yet: the next changes wait, merged, rather than queue up.
+        assert!(c.notify(&one("b")));
+        assert!(c.notify(&Changed { uris: vec!["a".into()], list: true }));
+        assert_eq!(rx.try_recv().unwrap(), ServerMsg::Changed(one("a")));
+        assert!(rx.try_recv().is_err());
+        queued.store(false, Ordering::Release); // as its writer does
+        assert!(c.notify(&Changed::default()));
+        assert_eq!(rx.try_recv().unwrap(), ServerMsg::Changed(Changed { uris: vec!["b".into(), "a".into()], list: true }));
+
+        // A full queue keeps the changes for later; a gone client is dropped.
+        queued.store(false, Ordering::Release);
+        for _ in 0..BACKLOG {
+            c.out.try_send(ServerMsg::Output(vec![])).unwrap();
+        }
+        assert!(c.notify(&one("c")));
+        assert!(!queued.load(Ordering::Acquire));
+        assert_eq!(c.pending, one("c"));
+        drop(rx);
+        assert!(!c.notify(&Changed::default()));
     }
 }
