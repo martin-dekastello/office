@@ -19,3 +19,11 @@ jobs:
         with:
           name: salash-${{ matrix.os }}
           path: target/release/salash
+  # Required status check on main: pending while CI runs (blocks merging),
+  # green once it finishes, whether build passed or not.
+  ci-done:
+    needs: build
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "build finished with ${{ needs.build.result }}"
