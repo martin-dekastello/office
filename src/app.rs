@@ -1736,7 +1736,12 @@ impl App {
                 }
             }
             _ => {
-                self.on_command(k);
+                // A typed character that isn't a sidebar key was likely meant for the tab.
+                let typed = matches!(k.code, KeyCode::Char(_))
+                    && !k.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER);
+                if !self.on_command(k) && typed {
+                    self.flash(format!("Sidebar has focus — ⏎ or {} s to type in the terminal", self.prefix_label()));
+                }
             }
         }
     }
@@ -2531,5 +2536,126 @@ mod tests {
         again.spawn_pane("a", 0);
         assert!(again.rt["a"].creating.is_none(), "a tab with a directory never asks for a worktree");
         std::fs::remove_dir_all(repo).ok();
+    }
+
+    /// Draw `app` into a `w`×`h` buffer.
+    fn render(app: &mut App, w: u16, h: u16) -> ratatui::buffer::Buffer {
+        let mut t = ratatui::Terminal::new(ratatui::backend::TestBackend::new(w, h)).unwrap();
+        t.draw(|f| crate::ui::draw(app, f)).unwrap();
+        t.backend().buffer().clone()
+    }
+
+    fn row(buf: &ratatui::buffer::Buffer, y: u16, from: u16) -> String {
+        (from..buf.area.width).map(|x| buf[(x, y)].symbol()).collect()
+    }
+
+    fn focus_app(focus: Focus) -> App {
+        let mut app = app(&[("a", &["t1", "t2"]), ("b", &[])]);
+        app.view = Stage::Active;
+        app.focus = focus;
+        app
+    }
+
+    #[test]
+    fn moving_focus_never_resizes_the_terminal() {
+        let mut app = focus_app(Focus::Sidebar);
+        render(&mut app, 100, 30);
+        let side = app.term_rect;
+        app.focus = Focus::Terminal;
+        render(&mut app, 100, 30);
+        assert_eq!(app.term_rect, side);
+        // Tab bar, frame line and status bar.
+        assert_eq!(app.term_rect.height, 30 - 3);
+        assert_eq!(app.term_rect.y, 2);
+    }
+
+    #[test]
+    fn the_frame_is_heavy_only_with_the_terminal_focused() {
+        // By shape, not colour.
+        for (focus, joint, column, line) in [(Focus::Terminal, "┢", "┃", "━"), (Focus::Sidebar, "├", "│", "─")] {
+            let mut app = focus_app(focus);
+            let buf = render(&mut app, 100, 30);
+            let x = app.sidebar_rect.right() - 1;
+            assert_eq!(buf[(x, 0)].symbol(), "│", "beside the tab bar stays thin");
+            assert_eq!(buf[(x, 1)].symbol(), joint);
+            assert_eq!(buf[(x, 15)].symbol(), column);
+            assert_eq!(buf[(x, 29)].symbol(), "│", "beside the status bar stays thin");
+            assert_eq!(row(&buf, 1, x + 1), line.repeat((99 - x) as usize));
+        }
+    }
+
+    #[test]
+    fn the_bar_and_the_tab_marker_follow_focus() {
+        let mut app = focus_app(Focus::Sidebar);
+        let buf = render(&mut app, 100, 30);
+        let x = app.term_rect.x;
+        let item = app.item_hits.iter().find(|(_, id)| id == "a").unwrap().0;
+        assert_eq!(buf[(item.x, item.y)].symbol(), "▌");
+        assert_eq!(buf[(x, 0)].symbol(), " ", "no active tab while the sidebar has focus");
+
+        app.focus = Focus::Terminal;
+        let buf = render(&mut app, 100, 30);
+        let item = app.item_hits.iter().find(|(_, id)| id == "a").unwrap().0;
+        assert_eq!(buf[(item.x, item.y)].symbol(), " ");
+        assert_eq!(buf[(x, 0)].symbol(), "▌");
+        assert_eq!(buf[(app.tab_hits[1].0.x, 0)].symbol(), " ", "only the active tab is marked");
+    }
+
+    fn luma(c: ratatui::style::Color) -> f32 {
+        let (r, g, b) = crate::theme::to_rgb(c, (128, 128, 128));
+        0.3 * r as f32 + 0.59 * g as f32 + 0.11 * b as f32
+    }
+
+    #[test]
+    fn the_side_without_focus_is_dimmed() {
+        // The " salash" header, in the dark theme: dimmed text is darker.
+        let mut app = focus_app(Focus::Sidebar);
+        let lit = render(&mut app, 100, 30)[(1, 0)].fg;
+        app.focus = Focus::Terminal;
+        let dim = render(&mut app, 100, 30)[(1, 0)].fg;
+        assert!(luma(dim) < luma(lit), "{dim:?} not dimmer than {lit:?}");
+    }
+
+    #[test]
+    fn dialogs_are_drawn_over_the_dimming() {
+        let mut app = focus_app(Focus::Terminal);
+        app.mode = Mode::Help;
+        let buf = render(&mut app, 100, 40);
+        // The help box's title sits over the sidebar; its border keeps the accent.
+        let y = (0..40).find(|&y| row(&buf, y, 0).contains("Keys — any key")).unwrap();
+        let x = (0..100).find(|&x| buf[(x, y)].symbol() == "╭").unwrap();
+        assert_eq!(buf[(x, y)].fg, crate::theme::get().accent);
+    }
+
+    #[test]
+    fn tiny_and_empty_screens_still_draw() {
+        let mut app = focus_app(Focus::Terminal);
+        for (w, h) in [(1, 1), (10, 3), (40, 5), (60, 6)] {
+            render(&mut app, w, h);
+        }
+        app.selected = None;
+        app.rt.clear();
+        app.focus = Focus::Sidebar;
+        render(&mut app, 80, 20);
+    }
+
+    #[test]
+    fn a_key_the_sidebar_ignores_says_where_focus_is() {
+        let press = |app: &mut App, code, mods| app.handle(Event::Key(KeyEvent::new(code, mods)));
+        let mut app = focus_app(Focus::Sidebar);
+        press(&mut app, KeyCode::Char('y'), KeyModifiers::NONE);
+        let msg = app.msg.take().map(|m| m.0).unwrap_or_default();
+        assert!(msg.starts_with("Sidebar has focus"), "{msg}");
+        assert!(msg.contains(&format!("{} s", app.prefix_label())));
+        assert!(app.focus == Focus::Sidebar && app.mode == Mode::Normal);
+
+        press(&mut app, KeyCode::Char('j'), KeyModifiers::NONE);
+        press(&mut app, KeyCode::Char('y'), KeyModifiers::ALT);
+        press(&mut app, KeyCode::F(5), KeyModifiers::NONE);
+        assert!(app.msg.is_none(), "{:?}", app.msg);
+
+        app.focus = Focus::Terminal;
+        press(&mut app, KeyCode::Char('y'), KeyModifiers::NONE);
+        assert!(app.msg.as_ref().is_none_or(|m| !m.0.starts_with("Sidebar")));
     }
 }
