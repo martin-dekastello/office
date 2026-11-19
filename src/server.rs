@@ -380,6 +380,7 @@ impl Server {
                     self.clients.remove(&id);
                 }
             }
+            Incoming::Msg(_, ClientMsg::Subscribe) => {}
             Incoming::Gone(id) => {
                 self.clients.remove(&id);
             }
