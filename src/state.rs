@@ -58,6 +58,8 @@ pub enum SortMode {
     /// Newest created first.
     #[default]
     Created,
+    /// By issue id, in natural order, so each source's prefix groups together.
+    Id,
     /// By title.
     Name,
     /// Most recently moved to its stage first.
@@ -69,7 +71,8 @@ pub enum SortMode {
 impl SortMode {
     pub fn next(self) -> SortMode {
         match self {
-            SortMode::Created => SortMode::Name,
+            SortMode::Created => SortMode::Id,
+            SortMode::Id => SortMode::Name,
             SortMode::Name => SortMode::Moved,
             SortMode::Moved => SortMode::Activity,
             SortMode::Activity => SortMode::Created,
@@ -79,10 +82,16 @@ impl SortMode {
     pub fn label(self) -> &'static str {
         match self {
             SortMode::Created => "created",
+            SortMode::Id => "id",
             SortMode::Name => "name",
             SortMode::Moved => "moved",
             SortMode::Activity => "activity",
         }
+    }
+
+    /// Whether the mode's own order, before any reversal, is A to Z.
+    pub fn ascending(self) -> bool {
+        matches!(self, SortMode::Id | SortMode::Name)
     }
 }
 
@@ -95,6 +104,9 @@ pub struct State {
     pub default_dir: Option<PathBuf>,
     #[serde(default)]
     pub sort: SortMode,
+    /// The sort runs the other way round from its own order.
+    #[serde(default)]
+    pub sort_reversed: bool,
 }
 
 fn path() -> PathBuf {
@@ -171,6 +183,7 @@ mod tests {
         let st: State = serde_json::from_str(json).unwrap();
         assert_eq!(st.default_dir, None);
         assert_eq!(st.sort, SortMode::Created);
+        assert!(!st.sort_reversed);
         assert_eq!(st.issues["i"].tabs[0].claude_session.as_deref(), Some("s"));
         assert_eq!(st.issues["i"].tabs[0].cwd, None);
     }

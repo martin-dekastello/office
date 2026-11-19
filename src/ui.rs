@@ -1,6 +1,6 @@
 use crate::app::{App, ConfirmKind, Focus, IssueRt, Mode, PromptKind, Tab, SCRATCH};
 use crate::complete::Completion;
-use crate::state::{SortMode, TabKind};
+use crate::state::TabKind;
 use crate::status::ClaudeStatus;
 use crate::term::Snapshot;
 use crate::theme::{self, Theme};
@@ -130,14 +130,13 @@ fn draw_sidebar(app: &mut App, f: &mut Frame, area: Rect) {
     app.quit_hit = Rect { x: head.right() - quit_w, width: quit_w, ..head };
     f.render_widget(Paragraph::new(Span::styled(" quit ", Style::new().fg(colors().fg_dim))), app.quit_hit);
 
-    // The sort, unless it's the default; dropped when the header is full.
-    if app.state.sort != SortMode::Created {
-        let label = format!("↕ {} ", app.state.sort.label());
-        let lw = label.chars().count() as u16;
-        if head_used as u16 + lw < head.width - quit_w {
-            let r = Rect { x: app.quit_hit.x - lw, width: lw, ..head };
-            f.render_widget(Paragraph::new(Span::styled(label, Style::new().fg(colors().fg_dim))), r);
-        }
+    // The sort, clickable to reverse it; dropped when the header is full.
+    let label = format!(" {} ", app.sort_label());
+    let lw = label.chars().count() as u16;
+    app.sort_hit = Rect::default();
+    if head_used as u16 + lw < head.width - quit_w {
+        app.sort_hit = Rect { x: app.quit_hit.x - lw, width: lw, ..head };
+        f.render_widget(Paragraph::new(Span::styled(label, Style::new().fg(colors().fg_dim))), app.sort_hit);
     }
 
     let full: usize = Stage::ALL.iter().map(|s| s.label().len() + app.count(*s).to_string().len() + 3).sum();
@@ -484,7 +483,8 @@ fn draw_help(app: &App, f: &mut Frame, area: Rect) {
         ("j/k ↑/↓".into(), "select issue"),
         ("⏎ / l".into(), "open issue (start/resume active tab)"),
         ("0/1/2/3, h/v".into(), "view To-do / Active / Done / Archive"),
-        ("s".into(), "sort by created / name / moved / activity"),
+        ("s".into(), "sort by created / id / name / moved / activity"),
+        ("i".into(), "reverse the sort (or click it in the header)"),
         ("Tab / Esc".into(), "back to terminal"),
         ("x / D / q".into(), "close tab / detach / quit"),
         ("".into(), ""),
