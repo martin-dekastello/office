@@ -335,14 +335,18 @@ one given with `--folder`.
 salash's own skills come as a Claude Code plugin named `salash`, built into the binary. Every
 time it starts, salash writes it to `<data>/plugin`, so it always matches the salash you have,
 and its Claude tabs load it with `--plugin-dir`. There is nothing to install, and Claude
-sessions outside salash never see it. In a Claude tab, `/salash:new-salash-tab plan <task>`
-writes a handoff brief from the conversation and opens a new Claude tab in the same issue,
-started in that mode with the brief as its first prompt. It's like `/new-claude-tmux`, but
-without tmux. Loading a plugin with `--plugin-dir` needs Claude Code 2.1.74 or later.
+sessions outside salash never see it. In a Claude tab, `/salash:new-tab plan <request>`
+turns the request into a self-contained handoff brief, with the context it needs from the
+conversation, and opens a new Claude tab in the same issue, started in that mode with the
+brief as its first prompt. It's like `/new-claude-tmux`, but without tmux. Loading a plugin
+with `--plugin-dir` needs Claude Code 2.1.74 or later. The skill used to be called
+`/salash:new-salash-tab`; it is now `/salash:new-tab`.
 
-Older salash versions had `salash install-skill`. If you ran it, you can delete
-`~/.claude/skills/new-salash-tab`: until you do, the old copy shows up as `/new-salash-tab`
-next to `/salash:new-salash-tab`, and it doesn't change when salash is upgraded.
+Older salash versions had `salash install-skill`. If you ran it, delete
+`~/.claude/skills/new-salash-tab`. Until you do, the old copy shows up as `/new-salash-tab`
+next to `/salash:new-tab` and doesn't change when salash is upgraded. It also works the old
+way, pasting your request into the brief word for word, and since it answers to the same
+phrases, Claude may pick it instead of `/salash:new-tab`.
 
 ## Claude sees salash (MCP)
 

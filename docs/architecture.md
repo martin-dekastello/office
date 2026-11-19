@@ -41,7 +41,7 @@ on purpose: two servers for one folder would fight over its state and its tabs. 
   requests/          `salash tab new` requests
   claude-hooks.json  the --settings file Claude tabs get
   claude-mcp.json    the --mcp-config file Claude tabs get, unless mcp = false
-  briefs/            handoff briefs written by /salash:new-salash-tab
+  briefs/            handoff briefs written by /salash:new-tab
   plugin/            the --plugin-dir Claude tabs get: salash's skills, rewritten at every start
 ```
 

@@ -8,7 +8,7 @@ use serde_json::json;
 use std::path::Path;
 
 /// The embedded skills: name and `SKILL.md`.
-const SKILLS: &[(&str, &str)] = &[("new-salash-tab", include_str!("../skills/new-salash-tab/SKILL.md"))];
+const SKILLS: &[(&str, &str)] = &[("new-tab", include_str!("../skills/new-tab/SKILL.md"))];
 
 /// Replace `root` with the plugin: the manifest and every skill. What was
 /// there before is removed first, so a skill this binary no longer has goes
@@ -61,7 +61,7 @@ mod tests {
         let m: Value = serde_json::from_slice(&std::fs::read(root.join(".claude-plugin/plugin.json")).unwrap()).unwrap();
         assert_eq!(m["name"], "salash");
         assert_eq!(m["version"], env!("CARGO_PKG_VERSION"));
-        assert!(SKILLS.iter().any(|(n, _)| *n == "new-salash-tab"));
+        assert!(SKILLS.iter().any(|(n, _)| *n == "new-tab"));
         for (name, text) in SKILLS {
             let got = std::fs::read_to_string(root.join("skills").join(name).join("SKILL.md")).unwrap();
             assert_eq!(got, *text);
@@ -78,7 +78,7 @@ mod tests {
 
         write_to(&root).unwrap();
         assert!(!root.join("skills/gone").exists());
-        assert!(root.join("skills/new-salash-tab/SKILL.md").is_file());
+        assert!(root.join("skills/new-tab/SKILL.md").is_file());
         std::fs::remove_dir_all(dir).ok();
     }
 
