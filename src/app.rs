@@ -298,6 +298,8 @@ pub struct App {
     pub tab_hits: Vec<(Rect, usize)>,
     pub close_hits: Vec<(Rect, usize)>,
     pub quit_hit: Rect,
+    /// The sort label in the sidebar header; a click reverses the sort.
+    pub sort_hit: Rect,
     /// A mouse press went to the pane, so its drag and release go there too.
     pane_drag: bool,
     /// The shell tab being selected in, and where the mouse last was.
@@ -444,6 +446,7 @@ impl App {
             tab_hits: vec![],
             close_hits: vec![],
             quit_hit: Rect::default(),
+            sort_hit: Rect::default(),
             pane_drag: false,
             pane_select: None,
             item_hits: vec![],
@@ -477,19 +480,46 @@ impl App {
     // ---------- issues ----------
 
     /// Issues of the current stage, in the chosen order. `notes` is newest-created
-    /// first, and the sorts are stable, so that breaks ties.
+    /// first, and the sorts are stable, so that breaks ties. Reversing flips the
+    /// key only: ties stay newest-created first, and undated issues stay last.
     pub fn visible(&self) -> Vec<&Note> {
         let mut v: Vec<&Note> = self.notes.iter().filter(|n| n.stage == self.view).collect();
+        let rev = self.state.sort_reversed;
+        let dir = |o: std::cmp::Ordering| if rev { o.reverse() } else { o };
         match self.state.sort {
-            SortMode::Created => {}
-            SortMode::Name => v.sort_by_cached_key(|n| n.title.to_lowercase()),
-            SortMode::Moved => v.sort_by(|a, b| {
+            SortMode::Created => {
+                if rev {
+                    v.reverse();
+                }
+            }
+            SortMode::Id => v.sort_by(|a, b| dir(natord::compare_ignore_case(&a.id, &b.id))),
+            SortMode::Name => v.sort_by(|a, b| dir(a.title.to_lowercase().cmp(&b.title.to_lowercase()))),
+            SortMode::Moved => {
                 let since = |n: &Note| n.moved.clone().or_else(|| n.created.clone());
-                since(b).cmp(&since(a))
-            }),
-            SortMode::Activity => v.sort_by_cached_key(|n| std::cmp::Reverse(self.activity_of(&n.id))),
+                v.sort_by(|a, b| {
+                    let (a, b) = (since(a), since(b));
+                    a.is_none().cmp(&b.is_none()).then_with(|| dir(b.cmp(&a)))
+                });
+            }
+            SortMode::Activity => {
+                let mut ranked: Vec<(u8, &Note)> = v.into_iter().map(|n| (self.activity_of(&n.id), n)).collect();
+                ranked.sort_by(|a, b| dir(b.0.cmp(&a.0)));
+                v = ranked.into_iter().map(|(_, n)| n).collect();
+            }
         }
         v
+    }
+
+    /// The sort as the sidebar header shows it, with an arrow for its direction.
+    pub fn sort_label(&self) -> String {
+        let up = self.state.sort.ascending() != self.state.sort_reversed;
+        format!("{} {}", if up { "↑" } else { "↓" }, self.state.sort.label())
+    }
+
+    fn flip_sort(&mut self) {
+        self.state.sort_reversed = !self.state.sort_reversed;
+        self.state.save();
+        self.flash(format!("Sort: {}", self.sort_label()));
     }
 
     /// The most urgent activity among the issue's tabs. Tabs of an issue not
@@ -1534,6 +1564,9 @@ impl App {
             MouseEventKind::Down(MouseButton::Left) => {
                 if self.quit_hit.contains(pos) {
                     self.mode = Mode::Confirm(ConfirmKind::Quit);
+                } else if self.sort_hit.contains(pos) {
+                    self.flip_sort();
+                    self.focus = Focus::Sidebar;
                 } else if let Some((_, i)) = self.close_hits.iter().find(|(r, _)| r.contains(pos)).cloned() {
                     self.switch_tab(i);
                     self.mode = Mode::Confirm(ConfirmKind::CloseTab);
@@ -1714,9 +1747,11 @@ impl App {
             KeyCode::Enter | KeyCode::Char('l') | KeyCode::Right => self.open_issue(),
             KeyCode::Char('s') => {
                 self.state.sort = self.state.sort.next();
+                self.state.sort_reversed = false;
                 self.state.save();
-                self.flash(format!("Sort: {}", self.state.sort.label()));
+                self.flash(format!("Sort: {}", self.sort_label()));
             }
+            KeyCode::Char('i') => self.flip_sort(),
             KeyCode::Char('0') => self.set_view(Stage::Todo),
             KeyCode::Char('1') => self.set_view(Stage::Active),
             KeyCode::Char('2') => self.set_view(Stage::Done),
@@ -2309,6 +2344,120 @@ mod tests {
 
     fn mouse(app: &mut App, kind: MouseEventKind, pos: Position) {
         app.handle(Event::Mouse(MouseEvent { kind, column: pos.x, row: pos.y, modifiers: KeyModifiers::NONE }));
+    }
+
+    /// An App over notes with these ids, keeping its state away from the real instance.
+    fn sort_app(ids: &[&str]) -> App {
+        crate::config::set_data_dir(Path::new(env!("CARGO_MANIFEST_DIR")).join("target/salash-unit-data"));
+        let tabs: Vec<(&str, &[&str])> = ids.iter().map(|id| (*id, &[][..])).collect();
+        app(&tabs)
+    }
+
+    fn order(app: &App) -> Vec<String> {
+        app.visible().iter().map(|n| n.id.clone()).collect()
+    }
+
+    #[test]
+    fn id_sort_groups_sources_and_counts_numbers() {
+        let mut app = sort_app(&["office-10", "LOCAL-2", "office-2", "PROJ-1", "local-10"]);
+        app.state.sort = SortMode::Id;
+        assert_eq!(order(&app), ["LOCAL-2", "local-10", "office-2", "office-10", "PROJ-1"]);
+        assert_eq!(app.sort_label(), "↑ id");
+        app.state.sort_reversed = true;
+        assert_eq!(order(&app), ["PROJ-1", "office-10", "office-2", "local-10", "LOCAL-2"]);
+        assert_eq!(app.sort_label(), "↓ id");
+    }
+
+    #[test]
+    fn i_reverses_the_sort_and_s_starts_the_next_one_unreversed() {
+        let mut app = sort_app(&["b", "a"]);
+        assert_eq!(app.sort_label(), "↓ created");
+        app.on_sidebar_key(KeyEvent::from(KeyCode::Char('i')));
+        assert_eq!(order(&app), ["a", "b"]);
+        assert_eq!(app.sort_label(), "↑ created");
+        app.on_sidebar_key(KeyEvent::from(KeyCode::Char('s')));
+        assert_eq!(app.state.sort, SortMode::Id);
+        assert!(!app.state.sort_reversed);
+        assert_eq!(order(&app), ["a", "b"]);
+    }
+
+    #[test]
+    fn clicking_the_sort_label_reverses_it() {
+        let mut app = sort_app(&["a", "b"]);
+        app.state.sort = SortMode::Name;
+        draw(&mut app);
+        let r = app.sort_hit;
+        assert!(r.width > 0, "sort label drawn");
+        mouse(&mut app, MouseEventKind::Down(MouseButton::Left), Position::new(r.x, r.y));
+        assert!(app.state.sort_reversed);
+        assert_eq!(order(&app), ["b", "a"]);
+        mouse(&mut app, MouseEventKind::Down(MouseButton::Left), Position::new(r.right() - 1, r.y));
+        assert!(!app.state.sort_reversed);
+    }
+
+    #[test]
+    fn the_sort_label_is_clickable_when_it_fits_exactly() {
+        // " salash" + "  ⠋ sync" + " ↓ activity " + " quit " fill the header.
+        let mut app = sort_app(&["a"]);
+        app.state.sort = SortMode::Activity;
+        app.syncing = true;
+        draw(&mut app);
+        assert_eq!(app.sort_hit.right(), app.quit_hit.x);
+        assert_eq!(app.sort_hit.x, 15, "the label starts right after the header text");
+        assert!(app.sort_hit.width > 0, "sort label drawn");
+    }
+
+    #[test]
+    fn reversing_keeps_ties_newest_created_first() {
+        // `notes` is newest-created first: "new" was created after "old".
+        let mut app = sort_app(&["new", "old", "busy"]);
+        app.rt.get_mut("busy").unwrap().tabs.push(tab(ClaudeStatus::Attention, 1, None));
+        app.state.sort = SortMode::Activity;
+        assert_eq!(order(&app), ["busy", "new", "old"]);
+        app.state.sort_reversed = true;
+        assert_eq!(order(&app), ["new", "old", "busy"]);
+
+        for n in &mut app.notes {
+            n.title = if n.id == "busy" { "a".into() } else { "same".into() };
+        }
+        app.state.sort = SortMode::Name;
+        assert_eq!(order(&app), ["new", "old", "busy"]);
+        app.state.sort_reversed = false;
+        assert_eq!(order(&app), ["busy", "new", "old"]);
+    }
+
+    #[test]
+    fn undated_issues_stay_last_in_the_moved_sort() {
+        let mut app = sort_app(&["undated", "early", "late"]);
+        for n in &mut app.notes {
+            n.moved = match n.id.as_str() {
+                "early" => Some("2026-01-01T00:00:00".into()),
+                "late" => Some("2026-02-01T00:00:00".into()),
+                _ => None,
+            };
+        }
+        app.state.sort = SortMode::Moved;
+        assert_eq!(order(&app), ["late", "early", "undated"]);
+        app.state.sort_reversed = true;
+        assert_eq!(order(&app), ["early", "late", "undated"]);
+    }
+
+    #[test]
+    fn sort_label_shows_each_modes_direction() {
+        let mut app = sort_app(&["a"]);
+        for (mode, label, reversed) in [
+            (SortMode::Created, "↓ created", "↑ created"),
+            (SortMode::Id, "↑ id", "↓ id"),
+            (SortMode::Name, "↑ name", "↓ name"),
+            (SortMode::Moved, "↓ moved", "↑ moved"),
+            (SortMode::Activity, "↓ activity", "↑ activity"),
+        ] {
+            app.state.sort = mode;
+            app.state.sort_reversed = false;
+            assert_eq!(app.sort_label(), label);
+            app.state.sort_reversed = true;
+            assert_eq!(app.sort_label(), reversed);
+        }
     }
 
     /// Left-click the issue's row.

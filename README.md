@@ -30,9 +30,12 @@ The name comes from the Slovak word *salaš*, a shepherd's hut up in the mountai
 - **Notes live in Obsidian**: `<vault>/<notes_dir>/{todo,active,done,archive}/<id>-<slug>.md`,
   one file per issue. Moving an issue to another stage moves the file and updates `status:`
   and `moved:`.
-- **Sorting.** `s` cycles the issue list between newest created (the default), name, most
-  recently moved to its stage, and activity. Activity puts an issue whose Claude needs you
-  first, then working, then done (not seen yet), then idle or suspended Claude, then shells
+- **Sorting.** `s` cycles the issue list between newest created (the default), issue id, name,
+  most recently moved to its stage, and activity. Id sorts all sources together in natural
+  order (`LOCAL-2`, `office-9`, `office-10`, `PROJ-1`), so each source's issues sit in one
+  block. The header shows the sort with ↑ or ↓; `i` or a click on it reverses the order, and
+  `s` starts the next sort in its usual direction. Activity puts an issue whose Claude needs
+  you first, then working, then done (not seen yet), then idle or suspended Claude, then shells
   only, then everything else. Each issue ranks by its most urgent tab.
 - **To-do vs Active.** New issues, synced or local, land in To-do. Active is what you're working
   on: move an issue there with `u`, or start a Claude session on a To-do issue and it moves
@@ -254,7 +257,8 @@ to the terminal.
 | `j`/`k` | select issue |
 | `⏎` | open issue: start or resume its active tab |
 | `0` `1` `2` `3` / `h` | view To-do / Active / Done / Archive |
-| `s` | sort by created / name / moved / activity |
+| `s` | sort by created / id / name / moved / activity |
+| `i` | reverse the sort (or click it in the header) |
 | `c` `t` `e` | new Claude / shell / note-editor tab |
 | `` ` `` | go to Scratch, for tabs outside any issue |
 | `z` / `R` | suspend Claude tab / reopen closed Claude tab |
