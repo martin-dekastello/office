@@ -9,7 +9,7 @@
 
 use crate::api::Request;
 use crate::instance::Instance;
-use crate::proto::{ClientMsg, ServerMsg, VERSION};
+use crate::proto::{Changed, ClientMsg, ServerMsg, VERSION};
 use crate::query::{Answer, Issue, Query, TabInfo};
 use crate::server::Conn;
 use crate::state::TabKind;
@@ -23,17 +23,22 @@ use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{
     Implementation, ListResourceTemplatesResult, ListResourcesResult, PaginatedRequestParams,
     ReadResourceRequestParams, ReadResourceResponse, ReadResourceResult, Resource,
-    ResourceContents, ResourceTemplate, ServerCapabilities, ServerConfig,
+    ResourceContents, ResourceTemplate, ResourceUpdatedNotificationParam, ServerCapabilities,
+    ServerConfig, SubscribeRequestParams, SubscriptionFilter, UnsubscribeRequestParams,
 };
 use rmcp::schemars::{self, JsonSchema};
-use rmcp::service::RequestContext;
-use rmcp::{tool, tool_handler, tool_router, ErrorData, RoleServer, ServerHandler, ServiceExt};
+use rmcp::service::{RequestContext, SubscriptionContext};
+use rmcp::{tool, tool_handler, tool_router, ErrorData, Peer, RoleServer, ServerHandler, ServiceExt};
 use serde::Deserialize;
 use serde_json::Value;
+use std::collections::BTreeSet;
 use std::io::{BufReader, BufWriter};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+use tokio::sync::broadcast;
 
 /// How long the server may take to answer. It answers between frames, so
 /// anything near this means it is stuck.
@@ -45,6 +50,10 @@ const OPEN_TIMEOUT: Duration = Duration::from_secs(60);
 const SCROLLBACK_LINES: usize = 200;
 /// Rows of a saved screen's last page, for `read_screen` of a suspended tab.
 const SAVED_ROWS: u16 = 50;
+/// How often to look for salash again after losing it, while subscribed.
+const RECONNECT: Duration = Duration::from_secs(1);
+/// What subscribers may fall behind by before they are told everything changed.
+const HEARD: usize = 64;
 
 const INSTRUCTIONS: &str = "salash runs Claude Code sessions, shells and note editors in tabs, \
 grouped by issue. These tools read its live state: issues and their stage, each tab's status \
@@ -53,12 +62,11 @@ act on the caller's own issue or tab; your own tab is marked \"self\": true.";
 
 /// `salash mcp`: serve MCP on stdin/stdout until the client goes.
 pub fn run(inst: Instance) -> Result<()> {
-    let conn = Link::open(&inst)?;
     let me = Me::from_env(&inst);
-    let link = Arc::new(Link { inst, conn: Mutex::new(Some(conn)) });
+    let link = Link::new(inst)?;
     let rt = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
     rt.block_on(async move {
-        let service = Salash { link, me, tool_router: Salash::tool_router() }
+        let service = Salash { link, me, legacy: Arc::default(), tool_router: Salash::tool_router() }
             .serve(rmcp::transport::stdio())
             .await
             .context("starting MCP")?;
@@ -67,17 +75,46 @@ pub fn run(inst: Instance) -> Result<()> {
     })
 }
 
-type Pipe = (BufReader<Conn>, BufWriter<Conn>);
+/// What the server says unasked, for subscribers.
+#[derive(Debug, Clone)]
+enum Heard {
+    Changed(Changed),
+    /// salash was found again after losing it: anything may have changed.
+    All,
+}
 
-/// The connection to the folder's server. One question at a time; after an
-/// error the next question connects again.
+/// One connection: where questions go, and where its reader thread puts the
+/// replies (and `Exit`). The channel ends when the connection does.
+struct Wire {
+    id: u64,
+    send: BufWriter<Conn>,
+    replies: Receiver<ServerMsg>,
+}
+
+/// The connection to the folder's server. One question at a time; after
+/// losing it the next question connects again, and so does a subscriber.
 struct Link {
     inst: Instance,
-    conn: Mutex<Option<Pipe>>,
+    conn: Mutex<Option<Wire>>,
+    heard: broadcast::Sender<Heard>,
+    /// Something subscribed, so every connection sends `Subscribe`.
+    watching: AtomicBool,
 }
 
 impl Link {
-    fn open(inst: &Instance) -> Result<Pipe> {
+    fn new(inst: Instance) -> Result<Arc<Link>> {
+        let link = Arc::new(Link {
+            inst,
+            conn: Mutex::new(None),
+            heard: broadcast::channel(HEARD).0,
+            watching: AtomicBool::new(false),
+        });
+        let first = Link::open(&link.inst)?;
+        link.attach(&mut link.conn.lock().unwrap(), first);
+        Ok(link)
+    }
+
+    fn open(inst: &Instance) -> Result<(BufReader<Conn>, BufWriter<Conn>)> {
         let stream = crate::client::connect(inst).map_err(|e| {
             let none = e
                 .downcast_ref::<std::io::Error>()
@@ -97,28 +134,101 @@ impl Link {
             Some(ServerMsg::Exit(why)) => bail!("{why}"),
             _ => bail!("salash sent something unexpected"),
         }
+        // Its reader waits as long as salash runs; questions time out on their own.
+        conn.set_recv_timeout(None)?;
         Ok((recv, BufWriter::new(Conn(conn))))
     }
 
-    fn ask(&self, query: Query) -> Result<Answer, String> {
-        let mut conn = self.conn.lock().unwrap();
-        if conn.is_none() {
-            *conn = Some(Link::open(&self.inst).map_err(|e| format!("{e:#}"))?);
+    /// Connect again, subscribing if something listens.
+    fn connect(self: &Arc<Self>, conn: &mut Option<Wire>) -> Result<(), String> {
+        let pipe = Link::open(&self.inst).map_err(|e| format!("{e:#}"))?;
+        self.attach(conn, pipe);
+        Ok(())
+    }
+
+    /// Start a reader for a new connection and make it the one questions use.
+    /// While watching it subscribes, and subscribers hear that anything may
+    /// have changed: salash may have restarted in between.
+    fn attach(self: &Arc<Self>, conn: &mut Option<Wire>, (recv, mut send): (BufReader<Conn>, BufWriter<Conn>)) {
+        static NEXT: AtomicU64 = AtomicU64::new(1);
+        let id = NEXT.fetch_add(1, Ordering::Relaxed);
+        let watching = self.watching.load(Ordering::SeqCst);
+        // A failed write shows up as the reader ending.
+        if watching {
+            let _ = ClientMsg::Subscribe.write(&mut send);
         }
-        let (recv, send) = conn.as_mut().unwrap();
-        let result = exchange(recv, send, query);
-        if result.is_err() {
+        let (tx, replies) = mpsc::channel();
+        let link = self.clone();
+        std::thread::spawn(move || link.read(id, recv, tx));
+        *conn = Some(Wire { id, send, replies });
+        if watching {
+            let _ = self.heard.send(Heard::All);
+        }
+    }
+
+    /// A connection's reader: replies go to the asker, changes to subscribers.
+    /// Once salash is gone, a subscriber's link looks for it again.
+    fn read(self: Arc<Self>, id: u64, mut recv: BufReader<Conn>, replies: Sender<ServerMsg>) {
+        loop {
+            match ServerMsg::read(&mut recv) {
+                Ok(Some(ServerMsg::Changed(c))) => {
+                    let _ = self.heard.send(Heard::Changed(c));
+                }
+                Ok(Some(m @ (ServerMsg::Reply { .. } | ServerMsg::Exit(_)))) => {
+                    let _ = replies.send(m);
+                }
+                Ok(Some(_)) => {}
+                Ok(None) | Err(_) => break,
+            }
+        }
+        // First, so an asker waiting on it hears at once, before the lock.
+        drop(replies);
+        let mut conn = self.conn.lock().unwrap();
+        if conn.as_ref().is_some_and(|w| w.id == id) {
             *conn = None;
         }
-        result
+        drop(conn);
+        while self.watching.load(Ordering::SeqCst) {
+            std::thread::sleep(RECONNECT);
+            let mut conn = self.conn.lock().unwrap();
+            if conn.is_some() || self.connect(&mut conn).is_ok() {
+                break;
+            }
+        }
+    }
+
+    fn ask(self: &Arc<Self>, query: Query) -> Result<Answer, String> {
+        let mut conn = self.conn.lock().unwrap();
+        if conn.is_none() {
+            self.connect(&mut conn)?;
+        }
+        exchange(&mut conn, query)
+    }
+
+    /// Have salash tell what changes, from now on and on every connection.
+    fn watch(self: &Arc<Self>) -> Result<(), String> {
+        if self.watching.swap(true, Ordering::SeqCst) {
+            return Ok(());
+        }
+        let mut conn = self.conn.lock().unwrap();
+        let sent = conn.as_mut().is_some_and(|w| ClientMsg::Subscribe.write(&mut w.send).is_ok());
+        if !sent {
+            *conn = None;
+            if let Err(e) = self.connect(&mut conn) {
+                self.watching.store(false, Ordering::SeqCst);
+                return Err(e);
+            }
+        }
+        Ok(())
     }
 }
 
-/// Send one query and wait for its reply. One is in flight at a time, so
-/// the id only has to differ from the last one's.
-fn exchange(recv: &mut BufReader<Conn>, send: &mut BufWriter<Conn>, query: Query) -> Result<Answer, String> {
-    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
-    let id = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+/// Send one query and wait for its reply. One is in flight at a time, but
+/// a reply that came too late may still arrive, so ids never repeat. A
+/// question that times out keeps the connection; one that loses it drops it.
+fn exchange(conn: &mut Option<Wire>, query: Query) -> Result<Answer, String> {
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+    let id = NEXT.fetch_add(1, Ordering::Relaxed);
     let opens = matches!(query, Query::OpenTab(_));
     let timeout = if opens { OPEN_TIMEOUT } else { REPLY_TIMEOUT };
     let lost = |e: &dyn std::fmt::Display| {
@@ -128,17 +238,24 @@ fn exchange(recv: &mut BufReader<Conn>, send: &mut BufWriter<Conn>, query: Query
             format!("lost salash: {e}")
         }
     };
-    recv.get_ref().0.set_recv_timeout(Some(timeout)).map_err(|e| lost(&e))?;
-    ClientMsg::Query { id, query }.write(send).map_err(|e| lost(&e))?;
-    loop {
-        match ServerMsg::read(recv) {
-            Ok(Some(ServerMsg::Reply { id: got, answer })) if got == id => return Ok(answer),
-            Ok(Some(ServerMsg::Exit(why))) => return Err(format!("salash stopped: {why}")),
-            Ok(Some(_)) => {}
-            Ok(None) => return Err("salash stopped".into()),
-            Err(e) => return Err(lost(&e)),
-        }
+    let wire = conn.as_mut().expect("connected before asking");
+    if let Err(e) = (ClientMsg::Query { id, query }).write(&mut wire.send) {
+        *conn = None;
+        return Err(lost(&e));
     }
+    let deadline = std::time::Instant::now() + timeout;
+    let result = loop {
+        let left = deadline.saturating_duration_since(std::time::Instant::now());
+        match wire.replies.recv_timeout(left) {
+            Ok(ServerMsg::Reply { id: got, answer }) if got == id => return Ok(answer),
+            Ok(ServerMsg::Exit(why)) => break Err(format!("salash stopped: {why}")),
+            Ok(_) => {}
+            Err(RecvTimeoutError::Timeout) => return Err(lost(&"timed out")),
+            Err(RecvTimeoutError::Disconnected) => break Err("salash stopped".into()),
+        }
+    };
+    *conn = None;
+    result
 }
 
 /// The salash tab this runs in, if it does: Claude passes its environment on.
@@ -167,7 +284,16 @@ impl Me {
 struct Salash {
     link: Arc<Link>,
     me: Me,
+    legacy: Arc<Legacy>,
     tool_router: ToolRouter<Salash>,
+}
+
+/// `resources/subscribe` of clients before 2026-07-28: the URIs, and whether
+/// the task that tells them about changes runs.
+#[derive(Default)]
+struct Legacy {
+    uris: Mutex<BTreeSet<String>>,
+    started: AtomicBool,
 }
 
 #[derive(Deserialize, JsonSchema, Default)]
@@ -281,6 +407,16 @@ impl Salash {
     async fn ask(&self, q: Query) -> Result<Answer, String> {
         let link = self.link.clone();
         tokio::task::spawn_blocking(move || link.ask(q)).await.map_err(|e| e.to_string())?
+    }
+
+    /// Have salash tell what changes, off the async runtime too.
+    async fn watch(&self) -> Result<(), ErrorData> {
+        let link = self.link.clone();
+        tokio::task::spawn_blocking(move || link.watch())
+            .await
+            .map_err(|e| e.to_string())
+            .and_then(|r| r)
+            .map_err(|e| ErrorData::internal_error(e, None))
     }
 
     fn mark(&self, t: &mut TabInfo) {
@@ -422,10 +558,70 @@ fn resource_error(e: String) -> ErrorData {
     ErrorData::resource_not_found(e, None)
 }
 
+/// Whether a resource can be subscribed to. Screens can't: they change with
+/// every byte a tab prints.
+fn notifiable(uri: &str) -> bool {
+    let one = |prefix| uri.strip_prefix(prefix).is_some_and(|id: &str| !id.is_empty() && !id.contains('/'));
+    uri == ISSUES_URI || one("salash://issue/") || one("salash://tab/")
+}
+
+/// What a `subscriptions/listen` gets of what it asked for: the list, and
+/// resources but screens. Tools and prompts never change.
+fn accepted(requested: &SubscriptionFilter) -> SubscriptionFilter {
+    let mut f = SubscriptionFilter::builder();
+    if requested.resources_list_changed == Some(true) {
+        f = f.resources_list_changed();
+    }
+    for uri in requested.resource_subscriptions.iter().flatten().filter(|u| notifiable(u)) {
+        f = f.resource_subscription(uri.clone());
+    }
+    f.build()
+}
+
+/// Which of `subscribed` to say were updated, and whether the list changed.
+fn affected(heard: &Heard, subscribed: &[String]) -> (Vec<String>, bool) {
+    match heard {
+        Heard::All => (subscribed.to_vec(), true),
+        Heard::Changed(c) => (subscribed.iter().filter(|u| c.uris.contains(u)).cloned().collect(), c.list),
+    }
+}
+
+/// The next thing heard. One that fell behind hears that anything may have changed.
+async fn next(rx: &mut broadcast::Receiver<Heard>) -> Option<Heard> {
+    match rx.recv().await {
+        Ok(h) => Some(h),
+        Err(broadcast::error::RecvError::Lagged(_)) => Some(Heard::All),
+        Err(broadcast::error::RecvError::Closed) => None,
+    }
+}
+
+/// Tell a client from before 2026-07-28 about changes to what it subscribed
+/// to, and to the list, until it goes.
+async fn forward(mut rx: broadcast::Receiver<Heard>, peer: Peer<RoleServer>, legacy: Arc<Legacy>) {
+    while let Some(heard) = next(&mut rx).await {
+        let subscribed: Vec<String> = legacy.uris.lock().unwrap().iter().cloned().collect();
+        let (updated, list) = affected(&heard, &subscribed);
+        for uri in updated {
+            if peer.notify_resource_updated(ResourceUpdatedNotificationParam::new(uri)).await.is_err() {
+                return;
+            }
+        }
+        if list && peer.notify_resource_list_changed().await.is_err() {
+            return;
+        }
+    }
+}
+
 #[tool_handler(router = self.tool_router)]
 impl ServerHandler for Salash {
     fn get_info(&self) -> ServerConfig {
-        ServerConfig::new(ServerCapabilities::builder().enable_tools().enable_resources().build())
+        let caps = ServerCapabilities::builder()
+            .enable_tools()
+            .enable_resources()
+            .enable_resources_subscribe()
+            .enable_resources_list_changed()
+            .build();
+        ServerConfig::new(caps)
             .with_server_info(Implementation::new("salash", env!("CARGO_PKG_VERSION")))
             .with_instructions(INSTRUCTIONS)
     }
@@ -484,6 +680,65 @@ impl ServerHandler for Salash {
         };
         Ok(ReadResourceResult::new(vec![ResourceContents::text(text, uri).with_mime_type(mime)]).into())
     }
+
+    fn accepted_subscription_filter(&self, requested: &SubscriptionFilter) -> Option<SubscriptionFilter> {
+        Some(accepted(requested))
+    }
+
+    async fn listen(&self, ctx: SubscriptionContext) -> Result<(), ErrorData> {
+        let mut rx = self.link.heard.subscribe();
+        self.watch().await?;
+        let accepted = ctx.accepted();
+        let uris = accepted.resource_subscriptions.clone().unwrap_or_default();
+        let list = accepted.resources_list_changed == Some(true);
+        loop {
+            let heard = tokio::select! {
+                _ = ctx.cancelled() => return Ok(()),
+                h = next(&mut rx) => match h {
+                    Some(h) => h,
+                    None => return Ok(()),
+                },
+            };
+            let (updated, listed) = affected(&heard, &uris);
+            for uri in updated {
+                if ctx.sink().notify_resource_updated(uri).await.is_err() {
+                    return Ok(());
+                }
+            }
+            if list && listed && ctx.sink().notify_resource_list_changed().await.is_err() {
+                return Ok(());
+            }
+        }
+    }
+
+    #[allow(deprecated)]
+    async fn subscribe(&self, req: SubscribeRequestParams, ctx: RequestContext<RoleServer>) -> Result<(), ErrorData> {
+        if !notifiable(&req.uri) {
+            return Err(ErrorData::invalid_params(
+                format!(
+                    "{} can't be subscribed to; salash://issues, salash://issue/{{id}} and salash://tab/{{id}} can (screens aren't notified)",
+                    req.uri
+                ),
+                None,
+            ));
+        }
+        self.legacy.uris.lock().unwrap().insert(req.uri);
+        if !self.legacy.started.swap(true, Ordering::SeqCst) {
+            let rx = self.link.heard.subscribe();
+            if let Err(e) = self.watch().await {
+                self.legacy.started.store(false, Ordering::SeqCst);
+                return Err(e);
+            }
+            tokio::spawn(forward(rx, ctx.peer.clone(), self.legacy.clone()));
+        }
+        Ok(())
+    }
+
+    #[allow(deprecated)]
+    async fn unsubscribe(&self, req: UnsubscribeRequestParams, _: RequestContext<RoleServer>) -> Result<(), ErrorData> {
+        self.legacy.uris.lock().unwrap().remove(&req.uri);
+        Ok(())
+    }
 }
 
 /// The folder `salash mcp` serves: the one given, else the one this runs in.
@@ -492,5 +747,45 @@ pub fn instance(folder: Option<PathBuf>) -> Result<Instance> {
         Some(f) => Instance::new(Some(&f)),
         None => Instance::find(&std::env::current_dir()?)
             .context("not in a salash folder; pass one: salash mcp <folder>"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn issues_and_tabs_can_be_subscribed_to_but_not_screens() {
+        for uri in ["salash://issues", "salash://issue/TS-42", "salash://issue/scratch", "salash://tab/t1"] {
+            assert!(notifiable(uri), "{uri}");
+        }
+        for uri in ["salash://tab/t1/screen", "salash://tab/", "salash://issue/", "salash://other", "file:///x", ""] {
+            assert!(!notifiable(uri), "{uri}");
+        }
+    }
+
+    #[test]
+    fn listen_accepts_the_list_and_resources_but_screens() {
+        let asked = SubscriptionFilter::builder()
+            .tools_list_changed()
+            .resources_list_changed()
+            .resource_subscriptions(["salash://tab/t1", "salash://tab/t1/screen", "salash://issues"].map(String::from))
+            .build();
+        let got = accepted(&asked);
+        assert_eq!(got.resources_list_changed, Some(true));
+        assert_eq!(got.tools_list_changed, None);
+        assert_eq!(got.resource_subscriptions, Some(vec!["salash://tab/t1".into(), "salash://issues".into()]));
+        assert_eq!(accepted(&SubscriptionFilter::new()), SubscriptionFilter::new());
+    }
+
+    #[test]
+    fn only_subscribed_uris_are_told() {
+        let subs = ["salash://tab/a".to_string(), "salash://issues".to_string()];
+        let c = Heard::Changed(Changed { uris: vec!["salash://tab/a".into(), "salash://tab/b".into()], list: false });
+        assert_eq!(affected(&c, &subs), (vec!["salash://tab/a".to_string()], false));
+        let c = Heard::Changed(Changed { uris: vec![], list: true });
+        assert_eq!(affected(&c, &subs), (vec![], true));
+        assert_eq!(affected(&Heard::All, &subs), (subs.to_vec(), true));
+        assert_eq!(affected(&Heard::All, &[]), (vec![], true));
     }
 }

@@ -148,7 +148,7 @@ fn run(inst: &Instance, conn: Stream) -> Result<()> {
                 }
             }
             Ok(Some(ServerMsg::Exit(why))) => break why,
-            Ok(Some(ServerMsg::Welcome { .. } | ServerMsg::Reply { .. })) => {}
+            Ok(Some(ServerMsg::Welcome { .. } | ServerMsg::Reply { .. } | ServerMsg::Changed(_))) => {}
             Ok(None) | Err(_) => break "salash stopped".into(),
         }
     };

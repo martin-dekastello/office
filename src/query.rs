@@ -9,7 +9,10 @@ use crate::app::{App, IssueRt, Tab, SCRATCH};
 use crate::state::{self, TabKind, TabState};
 use crate::status::{self, ClaudeStatus};
 use crate::vault::Stage;
+use crate::proto::Changed;
 use serde::{Deserialize, Serialize};
+use std::collections::{BTreeMap, BTreeSet};
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::path::PathBuf;
 
 /// The only modes a Claude session may pick for a tab it opens over MCP: both
@@ -182,8 +185,8 @@ fn claude_info(st: &TabState, status: ClaudeStatus, shown: ClaudeStatus) -> Clau
     }
 }
 
-fn tab_info(issue: &str, t: &Tab, rt: &IssueRt, active: bool, visible: bool) -> TabInfo {
-    let process = if t.running() {
+fn process(t: &Tab, rt: &IssueRt) -> Process {
+    if t.running() {
         Process::Running
     } else if t.pane.is_some() {
         Process::Exited
@@ -193,7 +196,20 @@ fn tab_info(issue: &str, t: &Tab, rt: &IssueRt, active: bool, visible: bool) -> 
         Process::Waiting
     } else {
         Process::Stopped
-    };
+    }
+}
+
+/// The process of a tab of an issue not opened since salash started.
+fn saved_process(st: &TabState) -> Process {
+    if st.kind == TabKind::Claude && st.claude_session.is_some() {
+        Process::Suspended
+    } else {
+        Process::Stopped
+    }
+}
+
+fn tab_info(issue: &str, t: &Tab, rt: &IssueRt, active: bool, visible: bool) -> TabInfo {
+    let process = process(t, rt);
     let claude = (t.st.kind == TabKind::Claude).then(|| claude_info(&t.st, t.status, t.shown_status()));
     TabInfo {
         id: t.st.id.clone(),
@@ -211,7 +227,6 @@ fn tab_info(issue: &str, t: &Tab, rt: &IssueRt, active: bool, visible: bool) -> 
 
 /// A tab of an issue not opened since salash started: no process yet.
 fn saved_tab_info(issue: &str, st: &TabState, active: bool) -> TabInfo {
-    let suspended = st.kind == TabKind::Claude && st.claude_session.is_some();
     TabInfo {
         id: st.id.clone(),
         issue: issue.to_string(),
@@ -220,7 +235,7 @@ fn saved_tab_info(issue: &str, st: &TabState, active: bool) -> TabInfo {
         cwd: st.cwd.clone(),
         active,
         visible: false,
-        process: if suspended { Process::Suspended } else { Process::Stopped },
+        process: saved_process(st),
         claude: (st.kind == TabKind::Claude).then(|| claude_info(st, ClaudeStatus::Exited, ClaudeStatus::Exited)),
         own: false,
     }
@@ -247,9 +262,13 @@ fn tabs_of(app: &App, id: &str) -> (Vec<TabInfo>, Vec<ClosedTab>, Option<PathBuf
     }
 }
 
+/// Scratch while it has tabs, then every issue with a note.
+fn issue_ids(app: &App) -> impl Iterator<Item = &str> {
+    (app.saved_tabs(SCRATCH) > 0).then_some(SCRATCH).into_iter().chain(app.notes.iter().map(|n| n.id.as_str()))
+}
+
 fn state(app: &App) -> State {
-    let ids = (app.saved_tabs(SCRATCH) > 0).then_some(SCRATCH).into_iter().chain(app.notes.iter().map(|n| n.id.as_str()));
-    State { issues: ids.filter_map(|id| issue(app, id)).collect(), selected: app.selected.clone() }
+    State { issues: issue_ids(app).filter_map(|id| issue(app, id)).collect(), selected: app.selected.clone() }
 }
 
 /// An issue: one with a note, or Scratch while it has tabs.
@@ -304,6 +323,68 @@ fn tab(app: &App, id: &str) -> Option<TabInfo> {
     })
 }
 
+/// What change notifications compare: a hash per resource URI of the fields
+/// that matter, and the issues `resources/list` gives. Built from memory only.
+/// Hook messages and when a tab was looked at are left out, so routine tool
+/// use doesn't notify; screens are never notified.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Fingerprints {
+    pub uris: BTreeMap<String, u64>,
+    pub listed: BTreeSet<String>,
+}
+
+fn hash(v: impl Hash) -> u64 {
+    let mut h = DefaultHasher::new();
+    v.hash(&mut h);
+    h.finish()
+}
+
+/// A tab's fields as text: the enums only derive `Debug`.
+fn tab_key(st: &TabState, process: Process, status: ClaudeStatus, shown: ClaudeStatus) -> String {
+    format!("{}\0{:?}\0{process:?}\0{status:?}\0{shown:?}", st.name, st.kind)
+}
+
+pub fn fingerprints(app: &App) -> Fingerprints {
+    let mut f = Fingerprints::default();
+    let mut summaries = vec![];
+    for id in issue_ids(app) {
+        let note = app.notes.iter().find(|n| n.id == id);
+        let (stage, title) = (note.map(|n| n.stage), note.map_or("Scratch", |n| n.title.as_str()));
+        let (tabs, closed, status): (Vec<(String, String)>, Vec<&str>, _) = match (app.rt.get(id), app.state.issues.get(id)) {
+            (Some(rt), _) => (
+                rt.tabs.iter().map(|t| (t.st.id.clone(), tab_key(&t.st, process(t, rt), t.status, t.shown_status()))).collect(),
+                rt.closed.iter().map(|t| t.id.as_str()).collect(),
+                rt.rollup(),
+            ),
+            (None, Some(s)) => (
+                s.tabs.iter().map(|t| (t.id.clone(), tab_key(t, saved_process(t), ClaudeStatus::Exited, ClaudeStatus::Exited))).collect(),
+                s.closed.iter().map(|t| t.id.as_str()).collect(),
+                None,
+            ),
+            (None, None) => (vec![], vec![], None),
+        };
+        let ids: Vec<&str> = tabs.iter().map(|(id, _)| id.as_str()).collect();
+        let head = format!("{id}\0{stage:?}\0{title}\0{status:?}");
+        f.uris.insert(format!("salash://issue/{id}"), hash((&head, &ids, &closed)));
+        summaries.push(format!("{head}\0{}", ids.len()));
+        if !tabs.is_empty() {
+            f.listed.insert(id.to_string());
+        }
+        for (tab, key) in &tabs {
+            f.uris.insert(format!("salash://tab/{tab}"), hash(key));
+        }
+    }
+    f.uris.insert("salash://issues".into(), hash(&summaries));
+    f
+}
+
+/// What changed from `old` to `new`: URIs that changed, came or went.
+pub fn diff(old: &Fingerprints, new: &Fingerprints) -> Changed {
+    let gone = old.uris.keys().filter(|u| !new.uris.contains_key(*u));
+    let changed = new.uris.iter().filter(|(u, h)| old.uris.get(*u) != Some(h)).map(|(u, _)| u);
+    Changed { uris: changed.chain(gone).cloned().collect(), list: old.listed != new.listed }
+}
+
 fn screen(app: &App, tab: &str, lines: usize, scrollback: bool) -> Answer {
     let found = app.rt.values().flat_map(|rt| rt.tabs.iter()).find(|t| t.st.id == tab);
     if let Some(p) = found.and_then(|t| t.pane.as_ref()) {
@@ -320,5 +401,28 @@ fn screen(app: &App, tab: &str, lines: usize, scrollback: bool) -> Answer {
         Answer::Saved(saved)
     } else {
         Answer::Error(format!("tab {tab} isn't running and has no saved screen"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn prints(uris: &[(&str, u64)], listed: &[&str]) -> Fingerprints {
+        Fingerprints {
+            uris: uris.iter().map(|(u, h)| (u.to_string(), *h)).collect(),
+            listed: listed.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
+    #[test]
+    fn diff_names_what_changed_came_or_went() {
+        let old = prints(&[("a", 1), ("b", 2), ("c", 3)], &["x"]);
+        assert_eq!(diff(&old, &old), Changed::default());
+        let new = prints(&[("a", 1), ("b", 9), ("d", 4)], &["x"]);
+        assert_eq!(diff(&old, &new), Changed { uris: vec!["b".into(), "d".into(), "c".into()], list: false });
+        let fewer = prints(&[("a", 1), ("b", 2), ("c", 3)], &[]);
+        assert_eq!(diff(&old, &fewer), Changed { uris: vec![], list: true });
+        assert_eq!(diff(&Fingerprints::default(), &Fingerprints::default()), Changed::default());
     }
 }

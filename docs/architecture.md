@@ -112,6 +112,20 @@ To undo it, quit salash, then move `<folder>/.salash/state.json` (with `snapshot
   asked about. The server never replays a saved screen for a query: for a
   suspended tab it answers with the snapshot's path, and `salash mcp` reads it. A screen query
   reads only the rows asked for, at most 2000. Measured round trips were about 0.2 ms.
+- **Change notifications.** A `salash mcp` with a subscriber sends `Subscribe` and becomes a
+  watcher. Only while there is one, the main loop hashes every 250 ms, per resource URI, the
+  fields that matter: for a tab its name, kind, process and status as shown; for an issue its
+  stage, title, rolled-up status and tab ids; for `salash://issues` each issue's summary.
+  It sends `Changed` with the URIs whose hash differs, and `list` when the issues that
+  `resources/list` gives (those with tabs) come or go. Hook messages and when a tab was looked
+  at aren't hashed, so routine tool use doesn't notify, and screens never are. The hashes are
+  built from memory, with no file reads, so the frame isn't held up. A watcher has at most one
+  `Changed` queued: while one waits, new changes merge into the next, so one that is slow to read
+  never fills its backlog. In `salash mcp`, a reader thread splits replies (to the one asker)
+  from `Changed`, which goes on a tokio broadcast channel to the `subscriptions/listen` streams
+  and to the task serving `resources/subscribe`. While subscribed, a lost salash is looked for
+  every second. Once it is back, subscribers hear that everything changed, as a restarted
+  server may differ in anything.
 
 ## Protocol (`src/proto.rs`)
 
@@ -122,15 +136,14 @@ Each frame is a tag byte, a big-endian `u32` length, then the payload. Frames ar
 |---|---|---|
 | 2 `Event` | client → server | a crossterm `Event` as JSON (key, mouse, paste, resize); the first is a `Resize` with the client's size |
 | 3 `Query` | client → server | `{"id", "body"}`: a question from `salash mcp` (`state`, `issue`, `tab`, `screen`, `open_tab`) as JSON |
+| 4 `Subscribe` | client → server | empty: tell me what changes, until I go |
 | 10 `Welcome` | server → client | capture the mouse or not (1 byte), protocol `VERSION` (1 byte) |
 | 11 `Output` | server → client | bytes to print |
 | 12 `Clipboard` | server → client | text to copy |
 | 13 `Open` | server → client | URL to open; the client only opens `http(s)://` and `obsidian://` |
 | 14 `Exit` | server → client | why: `detached`, `salash quit` |
 | 15 `Reply` | server → client | `{"id", "body"}`: the answer to the `Query` with that id, as JSON |
-
-Tags 4 and 16 are kept for change notifications to `salash mcp` (`Subscribe`, `Changed`),
-which don't exist yet.
+| 16 `Changed` | server → client | `{"uris", "list"}`: resources that changed, and whether the listed issues did |
 
 A client and a server from different builds (salash upgraded while a server ran) can meet. The
 client checks `VERSION` in `Welcome`, and a server from before there was one sends a single
@@ -163,7 +176,11 @@ from before versions sends tag 1, which a newer server rejects, closing the conn
   `capture-pane -p` (plain text, `-S` for history), and `list_tabs` is `list-panes -F`. The MCP
   side is the official Rust SDK, [`rmcp`](https://github.com/modelcontextprotocol/rust-sdk),
   with tokio only inside the `salash mcp` process. It handles both protocol generations Claude
-  Code speaks: `server/discover` (2026-07-28), then `initialize` (2025-11-25).
+  Code speaks: `server/discover` (2026-07-28), then `initialize` (2025-11-25). Notifications
+  likewise come both ways: `subscriptions/listen` (rmcp's `accepted_subscription_filter` and
+  `listen`), and the earlier `resources/subscribe`. Watching for changes by comparing hashes
+  is how tmux's `monitor-activity` and control mode's `%window-pane-changed` work too, at a
+  coarser grain.
 - salash's skills are a [Claude Code plugin](https://code.claude.com/docs/en/plugins/manifest-reference.md)
   embedded with `include_str!`, written out at startup and passed per session with
   `--plugin-dir`, as `claude-hooks.json` is with `--settings`. Unlike the hooks, it is passed even

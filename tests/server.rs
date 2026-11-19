@@ -144,7 +144,7 @@ fn one_server_per_folder_with_attach_detach_and_quit() {
     let mut server = env.server();
     let mut a = env.connect();
     let (welcome, _) = until(&mut a, 10);
-    assert_eq!(welcome, [1, 2]); // mouse on by default, protocol version 2
+    assert_eq!(welcome, [1, 3]); // mouse on by default, protocol version 3
     hello(&mut a, 100, 30);
     let (_, _) = until(&mut a, 11);
 
@@ -286,10 +286,29 @@ struct Mcp {
     stdin: std::process::ChildStdin,
     lines: std::sync::mpsc::Receiver<serde_json::Value>,
     next: u64,
+    /// Messages read while waiting for something else: notifications.
+    heard: std::collections::VecDeque<serde_json::Value>,
+    init: serde_json::Value,
 }
 
 impl Mcp {
-    fn start(mut cmd: Command, folder: &Path) -> Mcp {
+    fn start(cmd: Command, folder: &Path) -> Mcp {
+        let mut m = Mcp::spawn(cmd, folder);
+        m.init = m.call(
+            "initialize",
+            serde_json::json!({
+                "protocolVersion": "2025-11-25",
+                "capabilities": {},
+                "clientInfo": { "name": "test", "version": "0" },
+            }),
+        );
+        assert_eq!(m.init["serverInfo"]["name"], "salash", "{}", m.init);
+        m.notify("notifications/initialized");
+        m
+    }
+
+    /// Without `initialize`, as a 2026-07-28 client starts.
+    fn spawn(mut cmd: Command, folder: &Path) -> Mcp {
         use std::io::BufRead;
         let mut child = cmd
             .arg("mcp")
@@ -309,36 +328,66 @@ impl Mcp {
                 }
             }
         });
-        let mut m = Mcp { child, stdin, lines, next: 0 };
-        let init = m.call(
-            "initialize",
-            serde_json::json!({
-                "protocolVersion": "2025-11-25",
-                "capabilities": {},
-                "clientInfo": { "name": "test", "version": "0" },
-            }),
-        );
-        assert_eq!(init["serverInfo"]["name"], "salash", "{init}");
-        m.notify("notifications/initialized");
-        m
+        Mcp { child, stdin, lines, next: 0, heard: Default::default(), init: serde_json::Value::Null }
     }
 
     fn notify(&mut self, method: &str) {
         writeln!(self.stdin, "{}", serde_json::json!({ "jsonrpc": "2.0", "method": method })).unwrap();
     }
 
+    fn notify_with(&mut self, method: &str, params: serde_json::Value) {
+        writeln!(self.stdin, "{}", serde_json::json!({ "jsonrpc": "2.0", "method": method, "params": params })).unwrap();
+    }
+
+    /// Send a request without waiting for its answer; its id.
+    fn send(&mut self, method: &str, params: serde_json::Value) -> u64 {
+        self.next += 1;
+        let req = serde_json::json!({ "jsonrpc": "2.0", "id": self.next, "method": method, "params": params });
+        writeln!(self.stdin, "{req}").unwrap();
+        self.next
+    }
+
     /// The whole response to a request, result or error.
     fn request(&mut self, method: &str, params: serde_json::Value) -> serde_json::Value {
-        self.next += 1;
-        let id = self.next;
-        let req = serde_json::json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params });
-        writeln!(self.stdin, "{req}").unwrap();
+        let id = self.send(method, params);
         loop {
             let m = self.lines.recv_timeout(Duration::from_secs(10)).expect("no answer from salash mcp");
             if m["id"] == id {
                 return m;
             }
+            self.heard.push_back(m);
         }
+    }
+
+    /// The first message, heard already or within `within`, that `want` matches.
+    fn hear(&mut self, within: Duration, want: impl Fn(&serde_json::Value) -> bool) -> Option<serde_json::Value> {
+        if let Some(i) = self.heard.iter().position(&want) {
+            return self.heard.remove(i);
+        }
+        let deadline = Instant::now() + within;
+        while let Ok(m) = self.lines.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+            if want(&m) {
+                return Some(m);
+            }
+            self.heard.push_back(m);
+        }
+        None
+    }
+
+    /// Wait for `notifications/resources/updated` of `uri`.
+    fn updated(&mut self, uri: &str) -> serde_json::Value {
+        self.hear(Duration::from_secs(10), |m| is_updated(m, uri)).unwrap_or_else(|| panic!("no update of {uri}: {:?}", self.heard))
+    }
+
+    fn list_changed(&mut self) -> serde_json::Value {
+        self.hear(Duration::from_secs(10), |m| m["method"] == "notifications/resources/list_changed")
+            .unwrap_or_else(|| panic!("no list_changed: {:?}", self.heard))
+    }
+
+    /// Everything said within `d`, after what was heard before.
+    fn drain(&mut self, d: Duration) -> Vec<serde_json::Value> {
+        self.hear(d, |_| false);
+        self.heard.drain(..).collect()
     }
 
     /// The result of a request; panics on a JSON-RPC error.
@@ -372,6 +421,10 @@ impl Drop for Mcp {
         let _ = self.child.kill();
         let _ = self.child.wait();
     }
+}
+
+fn is_updated(m: &serde_json::Value, uri: &str) -> bool {
+    m["method"] == "notifications/resources/updated" && m["params"]["uri"] == uri
 }
 
 /// A server stopped when the test ends, as it would outlive it.
@@ -583,13 +636,120 @@ fn mcp_filters_issues_reads_scrollback_and_survives_a_restart() {
     assert_eq!(issue["branch"], "feat/ts-1");
     assert_eq!(issue["tabs"][0]["id"], tab.as_str());
 
-    // salash restarts: the same `salash mcp` connects to the new one.
+    // salash restarts: the same `salash mcp` connects to the new one, and a
+    // subscriber hears that anything may have changed, without asking.
+    m.call("resources/subscribe", serde_json::json!({ "uri": "salash://issue/TS-1" }));
+    m.drain(Duration::from_millis(500));
     drop(server);
     let _server = Stop(env.server());
     env.connect();
+    m.updated("salash://issue/TS-1");
+    m.list_changed();
     let again = eventually(|| {
         let (t, err) = m.tool("list_issues", serde_json::json!({}));
         (!err).then_some(t)
     });
     assert!(again.contains("TS-1"), "{again}");
+}
+
+#[test]
+fn mcp_tells_subscribers_what_changed() {
+    let env = Env::with(FAKES);
+    let _server = Stop(env.server());
+    let mut term = env.connect();
+    hello(&mut term, 100, 30);
+    let mut m = Mcp::start(env.cmd(), &env.folder);
+    let caps = &m.init["capabilities"]["resources"];
+    assert_eq!((caps["subscribe"].clone(), caps["listChanged"].clone()), (true.into(), true.into()), "{}", m.init);
+
+    // Screens and unknown URIs can't be subscribed to.
+    for uri in ["salash://tab/t1/screen", "salash://elsewhere"] {
+        let e = m.request("resources/subscribe", serde_json::json!({ "uri": uri }));
+        assert!(e["error"]["message"].as_str().unwrap_or_default().contains("can't be subscribed"), "{e}");
+    }
+    m.call("resources/subscribe", serde_json::json!({ "uri": "salash://issue/scratch" }));
+    m.call("resources/subscribe", serde_json::json!({ "uri": "salash://issues" }));
+    // Subscribing is the baseline: nothing changed yet.
+    assert_eq!(m.drain(Duration::from_millis(700)), Vec::<serde_json::Value>::new());
+
+    // A tab opens: Scratch changes, and as it now has tabs, so does the list.
+    let tab = m.ok("open_tab", serde_json::json!({ "issue": "scratch", "kind": "shell" }))["tab"].as_str().unwrap().to_string();
+    m.updated("salash://issue/scratch");
+    m.updated("salash://issues");
+    m.list_changed();
+    // Only what was subscribed to: not the new tab itself.
+    m.call("resources/subscribe", serde_json::json!({ "uri": format!("salash://tab/{tab}") }));
+    let heard = m.drain(Duration::from_secs(1));
+    assert!(heard.iter().all(|n| n["params"]["uri"] != format!("salash://tab/{tab}")), "{heard:?}");
+    // A tab printing doesn't notify: screens aren't resources that change.
+    assert!(heard.iter().all(|n| !is_updated(n, "salash://issue/scratch")), "quiet once open: {heard:?}");
+
+    // Unsubscribed, Scratch isn't told about though the list still is.
+    m.call("resources/unsubscribe", serde_json::json!({ "uri": "salash://issue/scratch" }));
+    m.ok("open_tab", serde_json::json!({ "issue": "scratch", "kind": "shell" }));
+    m.updated("salash://issues");
+    let heard = m.drain(Duration::from_millis(700));
+    assert!(heard.iter().all(|n| !is_updated(n, "salash://issue/scratch")), "{heard:?}");
+
+    // A watcher that never reads holds up neither the terminal nor questions.
+    let mut stuck = env.connect();
+    send(&mut stuck, 4, &[]);
+    for _ in 0..20 {
+        m.ok("open_tab", serde_json::json!({ "issue": "scratch", "kind": "shell" }));
+    }
+    assert_eq!(m.ok("list_issues", serde_json::json!({}))[0]["tabs"], 22);
+    // The terminal still gets frames: a new size is redrawn in full, which
+    // starts by clearing the screen.
+    hello(&mut term, 90, 30);
+    let start = Instant::now();
+    loop {
+        let (t, b) = recv(&mut term).expect("connection ended");
+        if t == 11 && b.windows(4).any(|w| w == b"\x1b[2J") {
+            break;
+        }
+        assert!(start.elapsed() < Duration::from_secs(5), "no redraw");
+    }
+}
+
+#[test]
+fn mcp_listens_as_2026_clients_do() {
+    let env = Env::with(FAKES);
+    let _server = Stop(env.server());
+    env.connect();
+    let mut m = Mcp::spawn(env.cmd(), &env.folder);
+    let meta = serde_json::json!({
+        "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+        "io.modelcontextprotocol/clientCapabilities": {},
+    });
+    let listen = m.send(
+        "subscriptions/listen",
+        serde_json::json!({
+            "_meta": meta,
+            "notifications": {
+                "resourcesListChanged": true,
+                "toolsListChanged": true,
+                "resourceSubscriptions": ["salash://issue/scratch", "salash://tab/t1/screen"],
+            },
+        }),
+    );
+    let ack = m
+        .hear(Duration::from_secs(10), |n| n["method"] == "notifications/subscriptions/acknowledged")
+        .unwrap_or_else(|| panic!("not acknowledged: {:?}", m.heard));
+    let accepted = &ack["params"]["notifications"];
+    assert_eq!(accepted["resourceSubscriptions"], serde_json::json!(["salash://issue/scratch"]), "{ack}");
+    assert_eq!(accepted["resourcesListChanged"], true, "{ack}");
+    assert!(accepted.get("toolsListChanged").is_none(), "tools never change: {ack}");
+
+    // Another client opens a tab; the listener hears it on its stream.
+    let mut other = Mcp::start(env.cmd(), &env.folder);
+    other.ok("open_tab", serde_json::json!({ "issue": "scratch", "kind": "shell" }));
+    m.updated("salash://issue/scratch");
+    m.list_changed();
+
+    // Cancelled, it hears no more.
+    m.notify_with("notifications/cancelled", serde_json::json!({ "requestId": listen }));
+    m.drain(Duration::from_millis(500));
+    other.ok("open_tab", serde_json::json!({ "issue": "scratch", "kind": "shell" }));
+    let heard = m.drain(Duration::from_millis(1000));
+    assert!(heard.iter().all(|n| !is_updated(n, "salash://issue/scratch")), "{heard:?}");
 }

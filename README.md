@@ -374,6 +374,12 @@ The same comes as resources: `salash://issues`, `salash://issue/{id}`, `salash:/
 `salash://tab/{id}/screen`. Inside a salash tab, tools without an issue or tab default to the
 caller's own, and the caller's tab is marked `"self": true`.
 
+A client can subscribe to those resources, with `subscriptions/listen` (MCP 2026-07-28) or
+`resources/subscribe` (2025-11-25), and is told within about a quarter of a second when a tab's
+status changes (working, needs attention, done, exited), a tab opens, closes or is suspended,
+or an issue changes stage or title. It also gets `list_changed` when issues come or go. Screens
+can't be subscribed to, and hook messages alone don't notify. Claude Code doesn't subscribe yet.
+
 Any Claude in a salash tab can read **every** tab's screen this way, in every issue: the same
 as anyone who can attach to salash. If that's too much, set `mcp = false`. `open_tab` takes
 only the modes `plan` and `manual`, or none for your default, so a session can't start another

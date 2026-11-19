@@ -6,8 +6,7 @@
 //! connection for queries instead (src/mcp.rs).
 //!
 //! Tags: 2-9 are client messages, 10-29 server messages. Tag 1 was the hello
-//! of clients from before versions and stays unused. 4 (`Subscribe`) and 16
-//! (`Changed`) are kept for change notifications to `salash mcp`.
+//! of clients from before versions and stays unused.
 
 use crate::query::{Answer, Query};
 use anyhow::{bail, Context, Result};
@@ -16,7 +15,7 @@ use std::io::{Read, Write};
 
 /// Changes whenever a message changes, so a client and a server from different
 /// builds of salash (one upgraded while the other ran) tell rather than misread.
-pub const VERSION: u8 = 2;
+pub const VERSION: u8 = 3;
 /// Larger frames mean the other end isn't salash. Clients only send events
 /// and queries, pastes and prompts included; servers send whole screens.
 const MAX_CLIENT_FRAME: u32 = 16 << 20;
@@ -28,6 +27,8 @@ pub enum ClientMsg {
     Event(Event),
     /// A question from `salash mcp`, answered with a `Reply` of the same id.
     Query { id: u64, query: Query },
+    /// From `salash mcp`: tell me what changes, with `Changed`, until I go.
+    Subscribe,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -45,6 +46,15 @@ pub enum ServerMsg {
     Exit(String),
     /// The answer to the `Query` with this id.
     Reply { id: u64, answer: Answer },
+    /// To a client that sent `Subscribe`: these resources changed, and with
+    /// `list`, so did the set of issues `resources/list` gives.
+    Changed(Changed),
+}
+
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct Changed {
+    pub uris: Vec<String>,
+    pub list: bool,
 }
 
 /// The payload of a `Query` or `Reply`: the id that pairs them, and the body.
@@ -91,6 +101,7 @@ impl ClientMsg {
             ClientMsg::Query { id, query } => {
                 write_frame(w, 3, &serde_json::to_vec(&Tagged { id: *id, body: query })?)
             }
+            ClientMsg::Subscribe => write_frame(w, 4, &[]),
         }
     }
 
@@ -102,6 +113,7 @@ impl ClientMsg {
                 let t: Tagged<Query> = serde_json::from_slice(&b).context("parsing query")?;
                 ClientMsg::Query { id: t.id, query: t.body }
             }
+            4 => ClientMsg::Subscribe,
             _ => bail!("unknown client message {tag}"),
         }))
     }
@@ -118,6 +130,7 @@ impl ServerMsg {
             ServerMsg::Reply { id, answer } => {
                 write_frame(w, 15, &serde_json::to_vec(&Tagged { id: *id, body: answer })?)
             }
+            ServerMsg::Changed(c) => write_frame(w, 16, &serde_json::to_vec(c)?),
         }
     }
 
@@ -134,6 +147,7 @@ impl ServerMsg {
                 let t: Tagged<Answer> = serde_json::from_slice(&b).context("parsing reply")?;
                 ServerMsg::Reply { id: t.id, answer: t.body }
             }
+            16 => ServerMsg::Changed(serde_json::from_slice(&b).context("parsing changes")?),
             _ => bail!("unknown server message {tag}"),
         }))
     }
@@ -152,6 +166,7 @@ mod tests {
             ClientMsg::Event(Event::Resize(80, 24)),
             ClientMsg::Query { id: 7, query: Query::State },
             ClientMsg::Query { id: 8, query: Query::Screen { tab: "t".into(), lines: 40, scrollback: true } },
+            ClientMsg::Subscribe,
             ClientMsg::Event(Event::Mouse(MouseEvent {
                 kind: MouseEventKind::ScrollUp,
                 column: 3,
@@ -181,6 +196,8 @@ mod tests {
             ServerMsg::Exit("detached".into()),
             ServerMsg::Reply { id: 7, answer: Answer::Screen("日本 ok\n".into()) },
             ServerMsg::Reply { id: 9, answer: Answer::Error("no tab x".into()) },
+            ServerMsg::Changed(Changed { uris: vec!["salash://tab/t1".into(), "salash://issues".into()], list: true }),
+            ServerMsg::Changed(Changed::default()),
         ];
         let mut buf = vec![];
         for m in &msgs {
