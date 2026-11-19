@@ -3,7 +3,7 @@ name = "salash"
 version = "0.0.2"
 edition = "2024"
 license = "GPL-3.0-or-later"
-repository = "https://github.com/martin-dekastello/office"
+repository = "https://github.com/martin-dekastello/salash"
 
 [dependencies]
 anyhow = "1.0.104"
