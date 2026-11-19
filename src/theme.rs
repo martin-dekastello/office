@@ -120,12 +120,97 @@ fn detect() -> Option<(f32, Option<Rgb>)> {
     Some((c.luma(), rgb))
 }
 
+/// xterm's default colours for ANSI 0–15; the host's palette may differ.
+const ANSI: [Rgb; 16] = [
+    (0, 0, 0),
+    (205, 0, 0),
+    (0, 205, 0),
+    (205, 205, 0),
+    (0, 0, 238),
+    (205, 0, 205),
+    (0, 205, 205),
+    (229, 229, 229),
+    (127, 127, 127),
+    (255, 0, 0),
+    (0, 255, 0),
+    (255, 255, 0),
+    (92, 92, 255),
+    (255, 0, 255),
+    (0, 255, 255),
+    (255, 255, 255),
+];
+
+/// `c` as RGB, with `reset` standing in for the terminal's default.
+pub fn to_rgb(c: Color, reset: Rgb) -> Rgb {
+    let i = match c {
+        Color::Reset => return reset,
+        Color::Rgb(r, g, b) => return (r, g, b),
+        Color::Indexed(i) => i,
+        Color::Black => 0,
+        Color::Red => 1,
+        Color::Green => 2,
+        Color::Yellow => 3,
+        Color::Blue => 4,
+        Color::Magenta => 5,
+        Color::Cyan => 6,
+        Color::Gray => 7,
+        Color::DarkGray => 8,
+        Color::LightRed => 9,
+        Color::LightGreen => 10,
+        Color::LightYellow => 11,
+        Color::LightBlue => 12,
+        Color::LightMagenta => 13,
+        Color::LightCyan => 14,
+        Color::White => 15,
+    };
+    match i {
+        0..=15 => ANSI[i as usize],
+        16..=231 => {
+            let level = |v: u8| if v == 0 { 0 } else { 55 + 40 * v };
+            let i = i - 16;
+            (level(i / 36), level(i / 6 % 6), level(i % 6))
+        }
+        _ => {
+            let v = 8 + 10 * (i - 232);
+            (v, v, v)
+        }
+    }
+}
+
+/// `from` moved `amount` (0–1) of the way to `to`.
+pub fn blend(from: Rgb, to: Rgb, amount: f32) -> Color {
+    let mix = |a: u8, b: u8| (a as f32 + (b as f32 - a as f32) * amount).round() as u8;
+    Color::Rgb(mix(from.0, to.0), mix(from.1, to.1), mix(from.2, to.2))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn bg(t: &Theme) -> Color {
         t.bg_side
+    }
+
+    #[test]
+    fn colours_resolve_to_rgb() {
+        assert_eq!(to_rgb(Color::Reset, (1, 2, 3)), (1, 2, 3));
+        assert_eq!(to_rgb(Color::Rgb(9, 8, 7), (0, 0, 0)), (9, 8, 7));
+        assert_eq!(to_rgb(Color::Red, (0, 0, 0)), (205, 0, 0));
+        assert_eq!(to_rgb(Color::Indexed(9), (0, 0, 0)), (255, 0, 0));
+        assert_eq!(to_rgb(Color::Indexed(16), (0, 0, 0)), (0, 0, 0));
+        assert_eq!(to_rgb(Color::Indexed(196), (0, 0, 0)), (255, 0, 0));
+        assert_eq!(to_rgb(Color::Indexed(231), (0, 0, 0)), (255, 255, 255));
+        assert_eq!(to_rgb(Color::Indexed(232), (0, 0, 0)), (8, 8, 8));
+        assert_eq!(to_rgb(Color::Indexed(255), (0, 0, 0)), (238, 238, 238));
+    }
+
+    #[test]
+    fn blending_moves_toward_either_background() {
+        assert_eq!(blend((200, 200, 200), (0, 0, 0), 0.0), Color::Rgb(200, 200, 200));
+        assert_eq!(blend((200, 200, 200), (0, 0, 0), 1.0), Color::Rgb(0, 0, 0));
+        assert_eq!(blend((200, 100, 0), (0, 0, 0), 0.5), Color::Rgb(100, 50, 0));
+        // Dark text on a light background gets lighter.
+        assert_eq!(blend((40, 40, 48), (255, 255, 255), 0.5), Color::Rgb(148, 148, 152));
     }
 
     #[test]

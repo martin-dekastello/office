@@ -6,7 +6,7 @@ use crate::term::Snapshot;
 use crate::theme::{self, Theme};
 use crate::vault::Stage;
 use ratatui::layout::{Alignment, Constraint, Layout, Rect};
-use ratatui::style::{Modifier, Style};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph, Wrap};
 use ratatui::Frame;
@@ -15,6 +15,9 @@ use tui_term::widget::{Cursor, PseudoTerminal};
 const SIDEBAR_W: u16 = 34;
 const MAX_MATCHES: usize = 8;
 const SPIN: [&str; 4] = ["◐", "◓", "◑", "◒"];
+/// How far dimming moves text toward its background, and backgrounds toward the pane's.
+const DIM_FG: f32 = 0.45;
+const DIM_BG: f32 = 0.3;
 
 fn colors() -> &'static Theme {
     theme::get()
@@ -59,8 +62,9 @@ fn truncate(s: &str, max: usize) -> String {
 pub fn draw(app: &mut App, f: &mut Frame) {
     let area = f.area();
     let [side, main] = Layout::horizontal([Constraint::Length(SIDEBAR_W), Constraint::Min(20)]).areas(area);
-    let [tabbar, term, statusbar] =
-        Layout::vertical([Constraint::Length(1), Constraint::Min(3), Constraint::Length(1)]).areas(main);
+    // The frame row is always there, so moving focus never resizes the PTY.
+    let [tabbar, frame, term, statusbar] =
+        Layout::vertical([Constraint::Length(1), Constraint::Length(1), Constraint::Min(3), Constraint::Length(1)]).areas(main);
     app.sidebar_rect = side;
     app.term_rect = term;
 
@@ -68,6 +72,17 @@ pub fn draw(app: &mut App, f: &mut Frame) {
     draw_tabbar(app, f, tabbar);
     draw_terminal(app, f, term);
     draw_statusbar(app, f, statusbar);
+
+    // The side without focus is dimmed, like tmux's window-style, before
+    // the frame and any dialog go on top.
+    let term_focused = app.focus == Focus::Terminal;
+    if term_focused {
+        dim_area(f.buffer_mut(), side);
+    } else {
+        dim_area(f.buffer_mut(), tabbar);
+        dim_area(f.buffer_mut(), term);
+    }
+    draw_frame(f, side, frame, term, term_focused);
 
     match app.mode.clone() {
         Mode::Help => draw_help(app, f, area),
@@ -97,7 +112,7 @@ fn draw_sidebar(app: &mut App, f: &mut Frame, area: Rect) {
     let focused = app.focus == Focus::Sidebar;
     let block = Block::new()
         .borders(Borders::RIGHT)
-        .border_style(Style::new().fg(if focused { colors().accent } else { colors().border }))
+        .border_style(Style::new().fg(colors().border))
         .style(Style::new().bg(colors().bg_side));
     let inner = block.inner(area);
     f.render_widget(block, area);
@@ -239,7 +254,9 @@ fn draw_sidebar(app: &mut App, f: &mut Frame, area: Rect) {
     f.render_widget(Paragraph::new(foot_text), foot);
 }
 
+/// With the sidebar focused no tab is drawn as active: the whole bar is muted.
 fn draw_tabbar(app: &mut App, f: &mut Frame, area: Rect) {
+    let focused = app.focus == Focus::Terminal;
     app.tab_hits.clear();
     app.close_hits.clear();
     f.render_widget(Block::new().style(Style::new().bg(colors().bg_tabbar)), area);
@@ -260,7 +277,7 @@ fn draw_tabbar(app: &mut App, f: &mut Frame, area: Rect) {
     let mut close_hits = vec![];
     for (i, t) in tabs.iter().enumerate() {
         let (g, gs) = tab_glyph(t, app.current_rt(), app.spinner);
-        let is_active = i == active;
+        let is_active = i == active && focused;
         let attention = t.st.kind == TabKind::Claude && t.pane.is_some() && t.shown_status() == ClaudeStatus::Attention;
         let bg = if is_active { colors().bg_tab_active } else { colors().bg_tab };
         let fg = if attention {
@@ -272,8 +289,9 @@ fn draw_tabbar(app: &mut App, f: &mut Frame, area: Rect) {
         };
         let label = truncate(&format!("{}:{}", i + 1, t.st.name), max_w.saturating_sub(6));
         let text_style = Style::new().fg(fg).bg(bg).add_modifier(if is_active { Modifier::BOLD } else { Modifier::empty() });
+        let marker = if is_active { "▌" } else { " " };
         let parts = [
-            Span::styled(" ", Style::new().bg(bg)),
+            Span::styled(marker, Style::new().fg(colors().accent).bg(bg)),
             Span::styled(g, gs.bg(bg)),
             Span::styled(format!(" {label} "), text_style),
             Span::styled("× ", Style::new().fg(colors().fg_dim).bg(bg)),
@@ -437,6 +455,50 @@ fn draw_statusbar(app: &mut App, f: &mut Frame, area: Rect) {
         Paragraph::new(Span::styled(right, Style::new().fg(colors().fg_dim))).alignment(Alignment::Right),
         area,
     );
+}
+
+/// The line under the tab bar and the divider column beside the terminal:
+/// heavy and accent with the terminal focused, thin otherwise. The divider
+/// beside the tab bar and status bar stays thin.
+fn draw_frame(f: &mut Frame, side: Rect, frame: Rect, term: Rect, focused: bool) {
+    if side.width == 0 || frame.height == 0 {
+        return;
+    }
+    let x = side.right() - 1;
+    let buf = f.buffer_mut();
+    let thin = Style::new().fg(colors().border).bg(colors().bg_side);
+    for y in side.top()..side.bottom() {
+        buf[(x, y)].set_symbol("│").set_style(thin);
+    }
+    let (style, line, column, joint) = if focused {
+        (Style::new().fg(colors().accent).add_modifier(Modifier::BOLD), "━", "┃", "┢")
+    } else {
+        (Style::new().fg(colors().border), "─", "│", "├")
+    };
+    buf[(x, frame.y)].set_symbol(joint).set_style(style.bg(colors().bg_side));
+    for y in term.top()..term.bottom() {
+        buf[(x, y)].set_symbol(column).set_style(style.bg(colors().bg_side));
+    }
+    for cx in frame.left()..frame.right() {
+        buf[(cx, frame.y)].set_symbol(line).set_style(style.bg(colors().bg_tabbar));
+    }
+}
+
+/// Blend every cell in `area` toward its background, so it stays readable
+/// but recedes, in either theme.
+fn dim_area(buf: &mut ratatui::buffer::Buffer, area: Rect) {
+    let t = colors();
+    let area = area.intersection(buf.area);
+    for y in area.top()..area.bottom() {
+        for x in area.left()..area.right() {
+            let cell = &mut buf[(x, y)];
+            let bg = theme::to_rgb(cell.bg, t.pane_bg);
+            cell.fg = theme::blend(theme::to_rgb(cell.fg, t.pane_fg), bg, DIM_FG);
+            if cell.bg != Color::Reset {
+                cell.bg = theme::blend(bg, t.pane_bg, DIM_BG);
+            }
+        }
+    }
 }
 
 fn centered(area: Rect, w: u16, h: u16) -> Rect {
