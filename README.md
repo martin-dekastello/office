@@ -249,6 +249,18 @@ they began.
 The prefix (default `Ctrl-a`, tmux-style) works everywhere. Press it twice to send it
 to the terminal.
 
+Keys go to either the sidebar or the terminal, and you can tell which at a glance:
+
+- **Terminal focused:** a heavy frame (`┃` `━`) in the accent colour runs along the
+  terminal's left edge and under the tab bar, the active tab has a `▌` marker, and the
+  sidebar is dimmed.
+- **Sidebar focused:** the frame is thin (`│` `─`), the selected issue has a `▌` bar, and the
+  terminal and tab bar are dimmed.
+
+The frame line is always there, so moving focus never resizes the tab. A printable key the
+sidebar doesn't use is dropped, and the status bar reminds you to press `⏎` or `<prefix> s`
+to type in the terminal.
+
 | Sidebar focused | |
 |---|---|
 | `j`/`k` | select issue |
