@@ -78,16 +78,23 @@ pub fn draw(app: &mut App, f: &mut Frame) {
                 PromptKind::RenameTab => " Rename tab (empty = auto) ".into(),
                 PromptKind::ClaudeDir => " New Claude tab — directory (Tab completes, empty = issue default) ".into(),
                 PromptKind::DefaultDir => format!(" Default directory — Tab completes, empty keeps {default} "),
+                PromptKind::ResumeId => " Resume session ID (or paste the note's claude --resume line) ".into(),
             };
             draw_prompt(f, area, &title, &buf, app.completion.as_ref());
         }
         Mode::Confirm(kind) => {
-            let q = match kind {
-                ConfirmKind::Quit => "Quit salash for everyone attached? Sessions stop; Claude tabs resume next time. (D detaches instead) [y/N]",
-                ConfirmKind::CloseTab => "Close this tab and stop its process? (R reopens Claude tabs) [y/N]",
-                ConfirmKind::Suspend => "Claude isn't idle, so this interrupts it. Suspend anyway? [y/N]",
+            let q: String = match kind {
+                ConfirmKind::Quit => "Quit salash for everyone attached? Sessions stop; Claude tabs resume next time. (D detaches instead) [y/N]".into(),
+                ConfirmKind::CloseTab => "Close this tab and stop its process? (R reopens Claude tabs) [y/N]".into(),
+                ConfirmKind::Suspend => "Claude isn't idle, so this interrupts it. Suspend anyway? [y/N]".into(),
+                ConfirmKind::Retire { stage, busy, .. } => format!(
+                    "Stop {} ({}) and move to {}? [y/N]",
+                    crate::app::tabs_n(busy.len(), "busy "),
+                    busy.join(", "),
+                    stage.label()
+                ),
             };
-            draw_prompt(f, area, " Confirm ", q, None);
+            draw_confirm(f, area, &q);
         }
         _ => {}
     }
@@ -225,7 +232,7 @@ fn draw_sidebar(app: &mut App, f: &mut Frame, area: Rect) {
             Line::from(Span::styled(" o obsidian d done n new ? keys", Style::new().fg(colors().fg_dim))),
             Line::from(Span::styled(" x close tab p default dir q quit", Style::new().fg(colors().fg_dim))),
             Line::from(Span::styled(" z suspend R reopen ` scratch", Style::new().fg(colors().fg_dim))),
-            Line::from(Span::styled(" D detach", Style::new().fg(colors().fg_dim))),
+            Line::from(Span::styled(" I resume id D detach", Style::new().fg(colors().fg_dim))),
         ]
     } else {
         vec![
@@ -476,6 +483,36 @@ fn draw_prompt(f: &mut Frame, area: Rect, title: &str, body: &str, matches: Opti
     f.render_widget(Paragraph::new(lines).block(b).style(Style::new().fg(colors().fg).bg(colors().bg_side)), r);
 }
 
+/// A question, wrapped so all of it shows: it may name several busy tabs.
+fn draw_confirm(f: &mut Frame, area: Rect, q: &str) {
+    let width = centered(area, 70, 3).width.saturating_sub(2).max(1) as usize;
+    let rows = wrapped_rows(q, width);
+    let r = centered(area, 70, 2 + rows);
+    f.render_widget(Clear, r);
+    let b = Block::bordered().border_type(BorderType::Rounded).title(" Confirm ").border_style(Style::new().fg(colors().accent));
+    let p = Paragraph::new(q.to_string()).wrap(Wrap { trim: true }).block(b);
+    f.render_widget(p.style(Style::new().fg(colors().fg).bg(colors().bg_side)), r);
+}
+
+/// Rows `s` takes when word-wrapped to `width`, as ratatui's `Wrap` does it.
+fn wrapped_rows(s: &str, width: usize) -> u16 {
+    let mut rows = 1;
+    let mut col = 0;
+    for w in s.split_whitespace() {
+        let n = w.chars().count();
+        if col > 0 && col + 1 + n > width {
+            rows += 1;
+            col = 0;
+        }
+        col += if col > 0 { 1 } else { 0 } + n;
+        while col > width {
+            rows += 1;
+            col -= width;
+        }
+    }
+    rows
+}
+
 fn draw_help(app: &App, f: &mut Frame, area: Rect) {
     let p = app.prefix_label();
     let rows: Vec<(String, &str)> = vec![
@@ -498,8 +535,10 @@ fn draw_help(app: &App, f: &mut Frame, area: Rect) {
         ("`".into(), "Scratch: tabs outside any issue"),
         ("x  ,".into(), "close tab, rename tab"),
         ("z / R".into(), "suspend Claude tab / reopen closed tab"),
+        ("I".into(), "resume a Claude session by ID in a new tab"),
         ("o / w".into(), "open note in Obsidian / issue in browser"),
         ("d / a / u / T".into(), "move issue to done / archive / active / to-do"),
+        ("".into(), "done / archive stop its tabs; the note keeps resume commands"),
         ("n".into(), "new local issue"),
         ("S / r".into(), "sync GitHub/Jira"),
         ("[ / ]".into(), "scroll the tab back / forward (also mouse wheel)"),

@@ -535,6 +535,11 @@ impl Pane {
         let _ = self.child.kill();
     }
 
+    #[cfg(test)]
+    pub fn pid(&self) -> Option<u32> {
+        self.child.process_id()
+    }
+
     /// The process group in the terminal's foreground, unless it's the child's
     /// own: a shell at its prompt, even with a job in the background, is idle.
     /// tmux reads `pane_current_command` the same way, with `tcgetpgrp` on the
@@ -544,7 +549,7 @@ impl Pane {
             return None;
         }
         let fg = self.master.process_group_leader()?;
-        (fg > 0 && Some(fg as u32) != self.child.process_id()).then_some(fg as i32)
+        (fg > 0 && Some(fg as u32) != self.child.process_id()).then_some(fg)
     }
 }
 
