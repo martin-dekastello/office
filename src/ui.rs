@@ -66,21 +66,25 @@ pub fn draw(app: &mut App, f: &mut Frame) {
     let [tabbar, frame, term, statusbar] =
         Layout::vertical([Constraint::Length(1), Constraint::Length(1), Constraint::Min(3), Constraint::Length(1)]).areas(main);
     app.sidebar_rect = side;
+    app.frame_rect = frame;
     app.term_rect = term;
 
-    draw_sidebar(app, f, side);
+    let side_list = draw_sidebar(app, f, side);
     draw_tabbar(app, f, tabbar);
     draw_terminal(app, f, term);
     draw_statusbar(app, f, statusbar);
 
     // The side without focus is dimmed, like tmux's window-style, before
-    // the frame and any dialog go on top.
+    // the frame and any dialog go on top. The sidebar's header (▲ count) and
+    // key footer stay lit: the footer says how to get back.
     let term_focused = app.focus == Focus::Terminal;
+    let buf = f.buffer_mut();
     if term_focused {
-        dim_area(f.buffer_mut(), side);
+        dim_area(buf, side_list, colors());
     } else {
-        dim_area(f.buffer_mut(), tabbar);
-        dim_area(f.buffer_mut(), term);
+        for r in [tabbar, term, statusbar] {
+            dim_area(buf, r, colors());
+        }
     }
     draw_frame(f, side, frame, term, term_focused);
 
@@ -98,17 +102,21 @@ pub fn draw(app: &mut App, f: &mut Frame) {
         }
         Mode::Confirm(kind) => {
             let q = match kind {
-                ConfirmKind::Quit => "Quit salash for everyone attached? Sessions stop; Claude tabs resume next time. (D detaches instead) [y/N]",
-                ConfirmKind::CloseTab => "Close this tab and stop its process? (R reopens Claude tabs) [y/N]",
-                ConfirmKind::Suspend => "Claude isn't idle, so this interrupts it. Suspend anyway? [y/N]",
+                ConfirmKind::Quit => "Quit salash for everyone attached? Sessions stop; Claude tabs resume next time. (D detaches instead) [y/N]".into(),
+                ConfirmKind::CloseTab => {
+                    let name = app.current_rt().and_then(|r| r.tabs.get(r.active)).map_or("", |t| t.st.name.as_str());
+                    format!("Close tab \"{name}\" and stop its process? (R reopens Claude tabs) [y/N]")
+                }
+                ConfirmKind::Suspend => "Claude isn't idle, so this interrupts it. Suspend anyway? [y/N]".into(),
             };
-            draw_prompt(f, area, " Confirm ", q, None);
+            draw_prompt(f, area, " Confirm ", &q, None);
         }
         _ => {}
     }
 }
 
-fn draw_sidebar(app: &mut App, f: &mut Frame, area: Rect) {
+/// Returns the stages and issue list, the part dimmed when the terminal has focus.
+fn draw_sidebar(app: &mut App, f: &mut Frame, area: Rect) -> Rect {
     let focused = app.focus == Focus::Sidebar;
     let block = Block::new()
         .borders(Borders::RIGHT)
@@ -252,9 +260,11 @@ fn draw_sidebar(app: &mut App, f: &mut Frame, area: Rect) {
         ]
     };
     f.render_widget(Paragraph::new(foot_text), foot);
+    stages.union(list)
 }
 
-/// With the sidebar focused no tab is drawn as active: the whole bar is muted.
+/// With the sidebar focused the active tab keeps its background, which sidebar
+/// commands (x, z, ,) act on, but loses the ▌ marker and bold.
 fn draw_tabbar(app: &mut App, f: &mut Frame, area: Rect) {
     let focused = app.focus == Focus::Terminal;
     app.tab_hits.clear();
@@ -277,19 +287,20 @@ fn draw_tabbar(app: &mut App, f: &mut Frame, area: Rect) {
     let mut close_hits = vec![];
     for (i, t) in tabs.iter().enumerate() {
         let (g, gs) = tab_glyph(t, app.current_rt(), app.spinner);
-        let is_active = i == active && focused;
+        let is_active = i == active;
+        let marked = is_active && focused;
         let attention = t.st.kind == TabKind::Claude && t.pane.is_some() && t.shown_status() == ClaudeStatus::Attention;
         let bg = if is_active { colors().bg_tab_active } else { colors().bg_tab };
         let fg = if attention {
             colors().amber
-        } else if is_active {
+        } else if marked {
             colors().fg_strong
         } else {
             colors().fg_tab
         };
         let label = truncate(&format!("{}:{}", i + 1, t.st.name), max_w.saturating_sub(6));
-        let text_style = Style::new().fg(fg).bg(bg).add_modifier(if is_active { Modifier::BOLD } else { Modifier::empty() });
-        let marker = if is_active { "▌" } else { " " };
+        let text_style = Style::new().fg(fg).bg(bg).add_modifier(if marked { Modifier::BOLD } else { Modifier::empty() });
+        let marker = if marked { "▌" } else { " " };
         let parts = [
             Span::styled(marker, Style::new().fg(colors().accent).bg(bg)),
             Span::styled(g, gs.bg(bg)),
@@ -461,15 +472,12 @@ fn draw_statusbar(app: &mut App, f: &mut Frame, area: Rect) {
 /// heavy and accent with the terminal focused, thin otherwise. The divider
 /// beside the tab bar and status bar stays thin.
 fn draw_frame(f: &mut Frame, side: Rect, frame: Rect, term: Rect, focused: bool) {
+    let buf = f.buffer_mut();
+    let [side, frame, term] = [side, frame, term].map(|r| r.intersection(buf.area));
     if side.width == 0 || frame.height == 0 {
         return;
     }
     let x = side.right() - 1;
-    let buf = f.buffer_mut();
-    let thin = Style::new().fg(colors().border).bg(colors().bg_side);
-    for y in side.top()..side.bottom() {
-        buf[(x, y)].set_symbol("│").set_style(thin);
-    }
     let (style, line, column, joint) = if focused {
         (Style::new().fg(colors().accent).add_modifier(Modifier::BOLD), "━", "┃", "┢")
     } else {
@@ -484,17 +492,24 @@ fn draw_frame(f: &mut Frame, side: Rect, frame: Rect, term: Rect, focused: bool)
     }
 }
 
-/// Blend every cell in `area` toward its background, so it stays readable
-/// but recedes, in either theme.
-fn dim_area(buf: &mut ratatui::buffer::Buffer, area: Rect) {
-    let t = colors();
+/// Make every cell in `area` recede but stay readable, in either theme. RGB
+/// colours are blended toward the background. Default, named and indexed
+/// colours come from the host's palette, which salash doesn't know, so they
+/// get the faint attribute and the terminal fades them itself.
+fn dim_area(buf: &mut ratatui::buffer::Buffer, area: Rect, t: &Theme) {
     let area = area.intersection(buf.area);
     for y in area.top()..area.bottom() {
         for x in area.left()..area.right() {
             let cell = &mut buf[(x, y)];
-            let bg = theme::to_rgb(cell.bg, t.pane_bg);
-            cell.fg = theme::blend(theme::to_rgb(cell.fg, t.pane_fg), bg, DIM_FG);
-            if cell.bg != Color::Reset {
+            let bg = match cell.bg {
+                Color::Rgb(r, g, b) => (r, g, b),
+                _ => t.pane_bg,
+            };
+            match cell.fg {
+                Color::Rgb(r, g, b) => cell.fg = theme::blend((r, g, b), bg, DIM_FG),
+                _ => cell.modifier.insert(Modifier::DIM),
+            }
+            if let Color::Rgb(..) = cell.bg {
                 cell.bg = theme::blend(bg, t.pane_bg, DIM_BG);
             }
         }
@@ -571,6 +586,7 @@ fn draw_help(app: &App, f: &mut Frame, area: Rect) {
         ("".into(), ""),
         ("Status".into(), "◐ working  ▲ needs you  ● done  ○ idle  ✕ exited"),
         ("".into(), "– suspended (⏎ resumes, scrolling still works)"),
+        ("Focus".into(), "heavy ┃━ = terminal has keys, thin │─ = sidebar"),
     ];
     let lines: Vec<Line> = rows
         .iter()
@@ -593,4 +609,40 @@ fn draw_help(app: &App, f: &mut Frame, area: Rect) {
             .style(Style::new().bg(colors().bg_side)),
         r,
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ratatui::buffer::Buffer;
+
+    fn dimmed(fg: Color, bg: Color, t: &Theme) -> ratatui::buffer::Cell {
+        let mut buf = Buffer::empty(Rect::new(0, 0, 1, 1));
+        buf[(0, 0)].set_fg(fg).set_bg(bg);
+        let area = buf.area;
+        dim_area(&mut buf, area, t);
+        buf[(0, 0)].clone()
+    }
+
+    #[test]
+    fn rgb_text_fades_toward_its_background_in_either_theme() {
+        let c = dimmed(Color::Rgb(205, 205, 214), Color::Rgb(22, 22, 26), &theme::DARK);
+        assert!(matches!(c.fg, Color::Rgb(r, ..) if r < 205), "{:?}", c.fg);
+        // Dark text on the light theme's background gets lighter.
+        let c = dimmed(Color::Rgb(40, 40, 48), Color::Rgb(244, 244, 247), &theme::LIGHT);
+        assert!(matches!(c.fg, Color::Rgb(r, ..) if r > 40), "{:?}", c.fg);
+        assert!(!c.modifier.contains(Modifier::DIM));
+    }
+
+    #[test]
+    fn palette_colours_keep_their_colour_and_turn_faint() {
+        // The host's palette decides what Blue and the default look like.
+        for fg in [Color::Blue, Color::Indexed(33), Color::Reset] {
+            let c = dimmed(fg, Color::Reset, &theme::DARK);
+            assert_eq!((c.fg, c.bg), (fg, Color::Reset));
+            assert!(c.modifier.contains(Modifier::DIM), "{fg:?}");
+        }
+        let c = dimmed(Color::Blue, Color::Indexed(4), &theme::LIGHT);
+        assert_eq!(c.bg, Color::Indexed(4));
+    }
 }

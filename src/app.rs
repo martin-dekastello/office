@@ -294,6 +294,8 @@ pub struct App {
     bell_pending: bool,
     // Hit areas from the last draw.
     pub term_rect: Rect,
+    /// The frame line under the tab bar.
+    pub frame_rect: Rect,
     pub sidebar_rect: Rect,
     pub tab_hits: Vec<(Rect, usize)>,
     pub close_hits: Vec<(Rect, usize)>,
@@ -440,6 +442,7 @@ impl App {
             plugin_dir,
             bell_pending: false,
             term_rect: Rect::default(),
+            frame_rect: Rect::default(),
             sidebar_rect: Rect::default(),
             tab_hits: vec![],
             close_hits: vec![],
@@ -1547,6 +1550,10 @@ impl App {
                     // Unlike ⏎, a click never starts, restarts or resumes a tab.
                     self.select_id(id);
                     self.focus_tab_if_live();
+                } else if self.frame_rect.contains(pos) {
+                    if self.can_focus_terminal() {
+                        self.focus = Focus::Terminal;
+                    }
                 } else if self.term_rect.contains(pos) {
                     if self.can_focus_terminal() {
                         self.focus = Focus::Terminal;
@@ -1737,10 +1744,9 @@ impl App {
             }
             _ => {
                 // A typed character that isn't a sidebar key was likely meant for the tab.
-                let typed = matches!(k.code, KeyCode::Char(_))
-                    && !k.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER);
-                if !self.on_command(k) && typed {
-                    self.flash(format!("Sidebar has focus — ⏎ or {} s to type in the terminal", self.prefix_label()));
+                let typed = matches!(k.code, KeyCode::Char(_)) && k.modifiers.difference(KeyModifiers::SHIFT).is_empty();
+                if !self.on_command(k) && typed && self.can_focus_terminal() {
+                    self.flash(format!("Sidebar has focus — Tab or {} s to type in the terminal", self.prefix_label()));
                 }
             }
         }
@@ -2549,8 +2555,13 @@ mod tests {
         (from..buf.area.width).map(|x| buf[(x, y)].symbol()).collect()
     }
 
+    /// Issue `a` has two suspended tabs, so the terminal can take focus; `b` has none.
     fn focus_app(focus: Focus) -> App {
         let mut app = app(&[("a", &["t1", "t2"]), ("b", &[])]);
+        for t in app.rt.get_mut("a").unwrap().tabs.iter_mut() {
+            t.st.name = t.st.id.clone();
+            t.st.claude_session = Some("s".into());
+        }
         app.view = Stage::Active;
         app.focus = focus;
         app
@@ -2591,7 +2602,9 @@ mod tests {
         let x = app.term_rect.x;
         let item = app.item_hits.iter().find(|(_, id)| id == "a").unwrap().0;
         assert_eq!(buf[(item.x, item.y)].symbol(), "▌");
-        assert_eq!(buf[(x, 0)].symbol(), " ", "no active tab while the sidebar has focus");
+        assert_eq!(buf[(x, 0)].symbol(), " ", "no marker while the sidebar has focus");
+        let (t1, t2) = (app.tab_hits[0].0.x + 2, app.tab_hits[1].0.x + 2);
+        assert_ne!(buf[(t1, 0)].bg, buf[(t2, 0)].bg, "the active tab still stands out");
 
         app.focus = Focus::Terminal;
         let buf = render(&mut app, 100, 30);
@@ -2602,18 +2615,50 @@ mod tests {
     }
 
     fn luma(c: ratatui::style::Color) -> f32 {
-        let (r, g, b) = crate::theme::to_rgb(c, (128, 128, 128));
+        let ratatui::style::Color::Rgb(r, g, b) = c else { panic!("{c:?} isn't RGB") };
         0.3 * r as f32 + 0.59 * g as f32 + 0.11 * b as f32
     }
 
     #[test]
     fn the_side_without_focus_is_dimmed() {
-        // The " salash" header, in the dark theme: dimmed text is darker.
+        // In the dark theme dimmed text is darker. The issue list dims; the
+        // " salash" header and the key footer stay lit.
         let mut app = focus_app(Focus::Sidebar);
-        let lit = render(&mut app, 100, 30)[(1, 0)].fg;
+        let lit = render(&mut app, 100, 30);
+        let item = app.item_hits.iter().find(|(_, id)| id == "a").unwrap().0;
+        // The issue's title, on its second line.
+        let (ix, iy) = (item.x + 3, item.y + 1);
+        let (tx, sy) = (app.tab_hits[1].0.x + 3, 29);
         app.focus = Focus::Terminal;
-        let dim = render(&mut app, 100, 30)[(1, 0)].fg;
-        assert!(luma(dim) < luma(lit), "{dim:?} not dimmer than {lit:?}");
+        let dim = render(&mut app, 100, 30);
+        assert!(luma(dim[(ix, iy)].fg) < luma(lit[(ix, iy)].fg), "issue list");
+        assert_eq!(dim[(1, 0)].fg, lit[(1, 0)].fg, "header stays lit");
+        assert_eq!(dim[(1, 25)].fg, lit[(1, 25)].fg, "footer stays lit");
+        // And the other way: tab bar and status bar dim with the sidebar focused.
+        assert!(luma(lit[(tx, 0)].fg) < luma(dim[(tx, 0)].fg), "tab bar");
+        assert!(luma(lit[(99, sy)].bg) < luma(dim[(99, sy)].bg), "status bar");
+    }
+
+    #[test]
+    fn clicking_the_frame_line_focuses_the_terminal() {
+        let mut app = focus_app(Focus::Sidebar);
+        render(&mut app, 100, 30);
+        let (x, y) = (app.frame_rect.x + 5, app.frame_rect.y);
+        app.handle(Event::Mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: x,
+            row: y,
+            modifiers: KeyModifiers::NONE,
+        }));
+        assert!(app.focus == Focus::Terminal);
+    }
+
+    #[test]
+    fn closing_a_tab_names_it() {
+        let mut app = focus_app(Focus::Sidebar);
+        app.mode = Mode::Confirm(ConfirmKind::CloseTab);
+        let buf = render(&mut app, 120, 30);
+        assert!((0..30).any(|y| row(&buf, y, 0).contains("Close tab \"t1\"")));
     }
 
     #[test]
@@ -2649,9 +2694,18 @@ mod tests {
         assert!(msg.contains(&format!("{} s", app.prefix_label())));
         assert!(app.focus == Focus::Sidebar && app.mode == Mode::Normal);
 
-        press(&mut app, KeyCode::Char('j'), KeyModifiers::NONE);
+        press(&mut app, KeyCode::Char('Y'), KeyModifiers::SHIFT);
+        assert!(app.msg.take().is_some(), "shift still counts as typing");
+
         press(&mut app, KeyCode::Char('y'), KeyModifiers::ALT);
+        press(&mut app, KeyCode::Char('y'), KeyModifiers::META);
         press(&mut app, KeyCode::F(5), KeyModifiers::NONE);
+        assert!(app.msg.is_none(), "{:?}", app.msg);
+
+        // Issue b has no tab to type in, so there's nothing to suggest.
+        press(&mut app, KeyCode::Char('j'), KeyModifiers::NONE);
+        assert_eq!(app.selected.as_deref(), Some("b"));
+        press(&mut app, KeyCode::Char('y'), KeyModifiers::NONE);
         assert!(app.msg.is_none(), "{:?}", app.msg);
 
         app.focus = Focus::Terminal;

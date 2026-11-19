@@ -253,13 +253,17 @@ Keys go to either the sidebar or the terminal, and you can tell which at a glanc
 
 - **Terminal focused:** a heavy frame (`┃` `━`) in the accent colour runs along the
   terminal's left edge and under the tab bar, the active tab has a `▌` marker, and the
-  sidebar is dimmed.
+  issue list is dimmed (its header and key hints stay lit).
 - **Sidebar focused:** the frame is thin (`│` `─`), the selected issue has a `▌` bar, and the
-  terminal and tab bar are dimmed.
+  tab bar, terminal and status bar are dimmed. The active tab keeps its background, without
+  the marker, so you can see which tab `x`, `z` and `,` act on.
 
-The frame line is always there, so moving focus never resizes the tab. A printable key the
-sidebar doesn't use is dropped, and the status bar reminds you to press `⏎` or `<prefix> s`
-to type in the terminal.
+Dimming blends salash's own colours and true-colour text toward the background; text in the
+terminal's default or palette colours gets the faint attribute, so your terminal fades it
+with its own palette. The frame line is always there, so moving focus never resizes the
+tab; clicking it moves focus to the terminal. A printable key the sidebar doesn't use is
+dropped, and when there is a tab to type in, the status bar reminds you to press `Tab` or
+`<prefix> s`.
 
 | Sidebar focused | |
 |---|---|
