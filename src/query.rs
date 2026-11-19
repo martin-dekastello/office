@@ -80,7 +80,7 @@ pub struct Issue {
     pub closed: Vec<ClosedTab>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Process {
     Running,
@@ -324,9 +324,10 @@ fn tab(app: &App, id: &str) -> Option<TabInfo> {
 }
 
 /// What change notifications compare: a hash per resource URI of the fields
-/// that matter, and the issues `resources/list` gives. Built from memory only.
-/// Hook messages and when a tab was looked at are left out, so routine tool
-/// use doesn't notify; screens are never notified.
+/// that resource gives, and the issues `resources/list` gives. Built from
+/// memory only. Hook messages, when a tab was looked at and whether it is on
+/// screen are left out, so routine tool use and clicking around don't
+/// notify; screens are never notified.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Fingerprints {
     pub uris: BTreeMap<String, u64>,
@@ -339,39 +340,52 @@ fn hash(v: impl Hash) -> u64 {
     h.finish()
 }
 
-/// A tab's fields as text: the enums only derive `Debug`.
-fn tab_key(st: &TabState, process: Process, status: ClaudeStatus, shown: ClaudeStatus) -> String {
-    format!("{}\0{:?}\0{process:?}\0{status:?}\0{shown:?}", st.name, st.kind)
+/// The hash of what `tab_info` gives but `visible`, which follows the
+/// sidebar, and what it reads from the hook's file.
+fn tab_hash(st: &TabState, active: bool, process: Process, status: ClaudeStatus, shown: ClaudeStatus) -> u64 {
+    hash((&st.name, st.kind, &st.cwd, active, process, status, shown, &st.claude_session))
 }
 
 pub fn fingerprints(app: &App) -> Fingerprints {
     let mut f = Fingerprints::default();
     let mut summaries = vec![];
-    for id in issue_ids(app) {
-        let note = app.notes.iter().find(|n| n.id == id);
-        let (stage, title) = (note.map(|n| n.stage), note.map_or("Scratch", |n| n.title.as_str()));
-        let (tabs, closed, status): (Vec<(String, String)>, Vec<&str>, _) = match (app.rt.get(id), app.state.issues.get(id)) {
+    let scratch = (app.saved_tabs(SCRATCH) > 0).then_some((SCRATCH, None));
+    for (id, note) in scratch.into_iter().chain(app.notes.iter().map(|n| (n.id.as_str(), Some(n)))) {
+        let (tabs, closed, worktree, status): (Vec<(&str, u64)>, Vec<&str>, _, _) = match (app.rt.get(id), app.state.issues.get(id)) {
             (Some(rt), _) => (
-                rt.tabs.iter().map(|t| (t.st.id.clone(), tab_key(&t.st, process(t, rt), t.status, t.shown_status()))).collect(),
+                rt.tabs
+                    .iter()
+                    .enumerate()
+                    .map(|(i, t)| (t.st.id.as_str(), tab_hash(&t.st, i == rt.active, process(t, rt), t.status, t.shown_status())))
+                    .collect(),
                 rt.closed.iter().map(|t| t.id.as_str()).collect(),
+                rt.worktree.as_ref(),
                 rt.rollup(),
             ),
             (None, Some(s)) => (
-                s.tabs.iter().map(|t| (t.id.clone(), tab_key(t, saved_process(t), ClaudeStatus::Exited, ClaudeStatus::Exited))).collect(),
+                s.tabs
+                    .iter()
+                    .enumerate()
+                    .map(|(i, t)| {
+                        (t.id.as_str(), tab_hash(t, i == s.active_tab, saved_process(t), ClaudeStatus::Exited, ClaudeStatus::Exited))
+                    })
+                    .collect(),
                 s.closed.iter().map(|t| t.id.as_str()).collect(),
+                s.worktree.as_ref(),
                 None,
             ),
-            (None, None) => (vec![], vec![], None),
+            (None, None) => (vec![], vec![], None, None),
         };
-        let ids: Vec<&str> = tabs.iter().map(|(id, _)| id.as_str()).collect();
-        let head = format!("{id}\0{stage:?}\0{title}\0{status:?}");
-        f.uris.insert(format!("salash://issue/{id}"), hash((&head, &ids, &closed)));
-        summaries.push(format!("{head}\0{}", ids.len()));
+        let fields = note.map(|n| (n.stage, &n.title, &n.source, &n.url, &n.repo, &n.path, &n.created, &n.moved));
+        let head = hash((id, fields, worktree, status));
+        f.uris.insert(format!("salash://issue/{id}"), hash((head, &tabs, &closed)));
+        // The list counts an issue's tabs rather than showing them.
+        summaries.push((head, tabs.len()));
         if !tabs.is_empty() {
             f.listed.insert(id.to_string());
         }
-        for (tab, key) in &tabs {
-            f.uris.insert(format!("salash://tab/{tab}"), hash(key));
+        for (tab, h) in tabs {
+            f.uris.insert(format!("salash://tab/{tab}"), h);
         }
     }
     f.uris.insert("salash://issues".into(), hash(&summaries));

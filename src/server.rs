@@ -439,6 +439,12 @@ impl Server {
                     c.asks = true;
                     c.watches = true;
                 }
+                // The baseline is now, not after the burst: a change made
+                // next in it is one to tell.
+                if self.prints.is_none() {
+                    self.prints = Some(query::fingerprints(app));
+                    self.watched = Instant::now();
+                }
             }
             Incoming::Gone(id) => {
                 self.clients.remove(&id);
@@ -598,21 +604,44 @@ mod tests {
         assert!(!String::from_utf8_lossy(&sink.take()).contains('x'));
     }
 
-    #[test]
-    fn a_slow_watcher_gets_one_changed_at_a_time_with_changes_merged() {
+    /// A `salash mcp` client, its queue's other end, and its `queued` flag.
+    fn watcher() -> (Client, Receiver<ServerMsg>, Arc<AtomicBool>) {
         let (out, rx) = mpsc::sync_channel(BACKLOG);
         let queued = Arc::new(AtomicBool::new(false));
-        let mut c = Client {
+        let c = Client {
             out,
             writer: std::thread::spawn(|| {}),
             size: None,
             asks: true,
-            watches: true,
+            watches: false,
             pending: Changed::default(),
             queued: queued.clone(),
             term: None,
             sink: Sink::default(),
         };
+        (c, rx, queued)
+    }
+
+    #[test]
+    fn a_change_in_the_same_burst_as_subscribe_is_told() {
+        use crate::app::tests::{click_app, unstarted_tab, with_tabs};
+        let (mut app, _vault) = click_app(&["A-1"]);
+        let mut srv = Server { clients: BTreeMap::new(), shared: None, mouse: false, prints: None, watched: Instant::now() };
+        let (c, rx, _) = watcher();
+        srv.clients.insert(1, c);
+        srv.on(Incoming::Msg(1, ClientMsg::Subscribe), &mut app);
+        // A tab opened before the next look for changes.
+        with_tabs(&mut app, "A-1", vec![unstarted_tab()], 0);
+        srv.watched -= WATCH;
+        srv.watch(&app);
+        let Ok(ServerMsg::Changed(c)) = rx.try_recv() else { panic!("not told") };
+        assert!(c.list && c.uris.contains(&"salash://issue/A-1".to_string()), "{c:?}");
+    }
+
+    #[test]
+    fn a_slow_watcher_gets_one_changed_at_a_time_with_changes_merged() {
+        let (mut c, rx, queued) = watcher();
+        c.watches = true;
         let one = |u: &str| Changed { uris: vec![u.into()], list: false };
         assert!(c.notify(&Changed::default()));
         assert!(rx.try_recv().is_err(), "nothing to tell");

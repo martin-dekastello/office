@@ -2321,7 +2321,7 @@ impl App {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     fn tab(status: ClaudeStatus, status_ts: i64, esc_ts: Option<i64>) -> Tab {
@@ -2653,7 +2653,7 @@ mod tests {
     const MUST_NOT_SPAWN: &str = "/nonexistent/salash-test-must-not-spawn";
 
     /// A vault dir removed on drop, even when an assertion fails first.
-    struct TempVault(PathBuf);
+    pub(crate) struct TempVault(PathBuf);
 
     impl Drop for TempVault {
         fn drop(&mut self) {
@@ -2663,7 +2663,7 @@ mod tests {
 
     /// A real App over a fresh vault holding `issues` in Active. Keep the
     /// returned guard alive for as long as the App.
-    fn click_app(issues: &[&str]) -> (App, TempVault) {
+    pub(crate) fn click_app(issues: &[&str]) -> (App, TempVault) {
         // The data dir (state.json, snapshots, status files) is set once per
         // test binary. A fixed dir under target/ keeps it away from the real
         // instance without leaking a new dir into /tmp on every run. Tests
@@ -2692,12 +2692,12 @@ mod tests {
         (app, vault)
     }
 
-    fn with_tabs(app: &mut App, id: &str, tabs: Vec<Tab>, active: usize) {
+    pub(crate) fn with_tabs(app: &mut App, id: &str, tabs: Vec<Tab>, active: usize) {
         app.rt.insert(id.to_string(), IssueRt { tabs, active, ..Default::default() });
     }
 
     /// A Claude tab with no pane and no session: never started.
-    fn unstarted_tab() -> Tab {
+    pub(crate) fn unstarted_tab() -> Tab {
         tab(ClaudeStatus::Exited, 0, None)
     }
 
@@ -3261,12 +3261,33 @@ mod tests {
         assert_eq!(d.uris, ["salash://issue/A-1", "salash://issues", "salash://tab/t"]);
         assert!(diff(&opened, &fingerprints(&app)).uris.is_empty(), "nothing changed");
 
-        // Looking at a tab or a hook's message doesn't notify; its status does.
+        // Looking at a tab or a hook's message doesn't notify; its status
+        // does, for the tab and the issue that lists it, but not for the
+        // list, which only counts tabs.
         app.rt.get_mut("A-1").unwrap().tabs[0].seen_ts = 99;
         assert_eq!(fingerprints(&app), opened);
         app.rt.get_mut("A-1").unwrap().tabs[0].status = ClaudeStatus::Working;
         let d = diff(&opened, &fingerprints(&app));
-        assert_eq!((d.uris.as_slice(), d.list), (["salash://tab/t".to_string()].as_slice(), false));
+        assert_eq!((d.uris.as_slice(), d.list), (["salash://issue/A-1", "salash://tab/t"].map(String::from).as_slice(), false));
+
+        // With two tabs, one changing while the rolled-up status stays the same.
+        let mut second = unstarted_tab();
+        second.st.id = "u".into();
+        app.rt.get_mut("A-1").unwrap().tabs.push(second);
+        let two = fingerprints(&app);
+        app.rt.get_mut("A-1").unwrap().tabs[1].status = ClaudeStatus::Done;
+        assert_eq!(app.rt["A-1"].rollup(), None);
+        assert_eq!(diff(&two, &fingerprints(&app)).uris, ["salash://issue/A-1", "salash://tab/u"]);
+
+        // Another tab made active: the issue and both tabs.
+        let done = fingerprints(&app);
+        app.rt.get_mut("A-1").unwrap().active = 1;
+        assert_eq!(diff(&done, &fingerprints(&app)).uris, ["salash://issue/A-1", "salash://tab/t", "salash://tab/u"]);
+
+        // A worktree is the issue's and the list's.
+        let active = fingerprints(&app);
+        app.rt.get_mut("A-1").unwrap().worktree = Some("/wt/A-1".into());
+        assert_eq!(diff(&active, &fingerprints(&app)).uris, ["salash://issue/A-1", "salash://issues"]);
 
         // A title change is the issue's and the list's, not its tabs'.
         let working = fingerprints(&app);
