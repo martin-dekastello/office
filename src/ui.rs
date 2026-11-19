@@ -86,7 +86,10 @@ pub fn draw(app: &mut App, f: &mut Frame) {
             dim_area(buf, r, colors());
         }
     }
-    draw_frame(f, side, frame, term, term_focused);
+    // Next to the first tab the frame climbs into the tab bar and is its marker,
+    // so the two don't sit a column apart.
+    let tab_edge = term_focused && app.current_tabs().is_some_and(|(t, a)| !t.is_empty() && a == 0);
+    draw_frame(f, side, tabbar, frame, term, term_focused, tab_edge);
 
     match app.mode.clone() {
         Mode::Help => draw_help(app, f, area),
@@ -263,7 +266,8 @@ fn draw_sidebar(app: &mut App, f: &mut Frame, area: Rect) -> Rect {
 }
 
 /// With the sidebar focused the active tab keeps its background, which sidebar
-/// commands (x, z, ,) act on, but loses the ▌ marker and bold.
+/// commands (x, z, ,) act on, but loses the ▌ marker and bold. The first tab
+/// has no ▌: the frame beside it is its marker (see draw_frame).
 fn draw_tabbar(app: &mut App, f: &mut Frame, area: Rect) {
     let focused = app.focus == Focus::Terminal;
     app.tab_hits.clear();
@@ -299,7 +303,7 @@ fn draw_tabbar(app: &mut App, f: &mut Frame, area: Rect) {
         };
         let label = truncate(&format!("{}:{}", i + 1, t.st.name), max_w.saturating_sub(6));
         let text_style = Style::new().fg(fg).bg(bg).add_modifier(if marked { Modifier::BOLD } else { Modifier::empty() });
-        let marker = if marked { "▌" } else { " " };
+        let marker = if marked && i > 0 { "▌" } else { " " };
         let parts = [
             Span::styled(marker, Style::new().fg(colors().accent).bg(bg)),
             Span::styled(g, gs.bg(bg)),
@@ -469,19 +473,23 @@ fn draw_statusbar(app: &mut App, f: &mut Frame, area: Rect) {
 
 /// The line under the tab bar and the divider column beside the terminal:
 /// heavy and accent with the terminal focused, thin otherwise. The divider
-/// beside the tab bar and status bar stays thin.
-fn draw_frame(f: &mut Frame, side: Rect, frame: Rect, term: Rect, focused: bool) {
+/// beside the status bar stays thin, and beside the tab bar too unless
+/// `tab_edge`, when it continues up to mark the active first tab.
+fn draw_frame(f: &mut Frame, side: Rect, tabbar: Rect, frame: Rect, term: Rect, focused: bool, tab_edge: bool) {
     let buf = f.buffer_mut();
-    let [side, frame, term] = [side, frame, term].map(|r| r.intersection(buf.area));
+    let [side, tabbar, frame, term] = [side, tabbar, frame, term].map(|r| r.intersection(buf.area));
     if side.width == 0 || frame.height == 0 {
         return;
     }
     let x = side.right() - 1;
-    let (style, line, column, joint) = if focused {
-        (Style::new().fg(colors().accent).add_modifier(Modifier::BOLD), "━", "┃", "┢")
-    } else {
-        (Style::new().fg(colors().border), "─", "│", "├")
+    let (style, line, column, joint) = match (focused, tab_edge) {
+        (true, true) => (Style::new().fg(colors().accent).add_modifier(Modifier::BOLD), "━", "┃", "┣"),
+        (true, false) => (Style::new().fg(colors().accent).add_modifier(Modifier::BOLD), "━", "┃", "┢"),
+        _ => (Style::new().fg(colors().border), "─", "│", "├"),
     };
+    if focused && tab_edge && tabbar.height > 0 {
+        buf[(x, tabbar.y)].set_symbol(column).set_style(style.bg(colors().bg_side));
+    }
     buf[(x, frame.y)].set_symbol(joint).set_style(style.bg(colors().bg_side));
     for y in term.top()..term.bottom() {
         buf[(x, y)].set_symbol(column).set_style(style.bg(colors().bg_side));
