@@ -65,7 +65,7 @@ The name comes from the Slovak word *salaš*, a shepherd's hut up in the mountai
 ## Install
 
 Download the binary for your platform from
-[Releases](https://github.com/martin-dekastello/office/releases): macOS (Apple silicon),
+[Releases](https://github.com/martin-dekastello/salash/releases): macOS (Apple silicon),
 Linux arm64 or Linux x86_64. The Linux builds are static (musl), so they run on any distro.
 
 ```sh
