@@ -134,7 +134,7 @@ fn draw_sidebar(app: &mut App, f: &mut Frame, area: Rect) {
     let label = format!(" {} ", app.sort_label());
     let lw = label.chars().count() as u16;
     app.sort_hit = Rect::default();
-    if head_used as u16 + lw < head.width - quit_w {
+    if head_used as u16 + lw <= head.width - quit_w {
         app.sort_hit = Rect { x: app.quit_hit.x - lw, width: lw, ..head };
         f.render_widget(Paragraph::new(Span::styled(label, Style::new().fg(colors().fg_dim))), app.sort_hit);
     }

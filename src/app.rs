@@ -480,21 +480,32 @@ impl App {
     // ---------- issues ----------
 
     /// Issues of the current stage, in the chosen order. `notes` is newest-created
-    /// first, and the sorts are stable, so that breaks ties.
+    /// first, and the sorts are stable, so that breaks ties. Reversing flips the
+    /// key only: ties stay newest-created first, and undated issues stay last.
     pub fn visible(&self) -> Vec<&Note> {
         let mut v: Vec<&Note> = self.notes.iter().filter(|n| n.stage == self.view).collect();
+        let rev = self.state.sort_reversed;
+        let dir = |o: std::cmp::Ordering| if rev { o.reverse() } else { o };
         match self.state.sort {
-            SortMode::Created => {}
-            SortMode::Id => v.sort_by(|a, b| natord::compare_ignore_case(&a.id, &b.id)),
-            SortMode::Name => v.sort_by_cached_key(|n| n.title.to_lowercase()),
-            SortMode::Moved => v.sort_by(|a, b| {
+            SortMode::Created => {
+                if rev {
+                    v.reverse();
+                }
+            }
+            SortMode::Id => v.sort_by(|a, b| dir(natord::compare_ignore_case(&a.id, &b.id))),
+            SortMode::Name => v.sort_by(|a, b| dir(a.title.to_lowercase().cmp(&b.title.to_lowercase()))),
+            SortMode::Moved => {
                 let since = |n: &Note| n.moved.clone().or_else(|| n.created.clone());
-                since(b).cmp(&since(a))
-            }),
-            SortMode::Activity => v.sort_by_cached_key(|n| std::cmp::Reverse(self.activity_of(&n.id))),
-        }
-        if self.state.sort_reversed {
-            v.reverse();
+                v.sort_by(|a, b| {
+                    let (a, b) = (since(a), since(b));
+                    a.is_none().cmp(&b.is_none()).then_with(|| dir(b.cmp(&a)))
+                });
+            }
+            SortMode::Activity => {
+                let mut ranked: Vec<(u8, &Note)> = v.into_iter().map(|n| (self.activity_of(&n.id), n)).collect();
+                ranked.sort_by(|a, b| dir(b.0.cmp(&a.0)));
+                v = ranked.into_iter().map(|(_, n)| n).collect();
+            }
         }
         v
     }
@@ -2382,6 +2393,71 @@ mod tests {
         assert_eq!(order(&app), ["b", "a"]);
         mouse(&mut app, MouseEventKind::Down(MouseButton::Left), Position::new(r.right() - 1, r.y));
         assert!(!app.state.sort_reversed);
+    }
+
+    #[test]
+    fn the_sort_label_is_clickable_when_it_fits_exactly() {
+        // " salash" + "  ⠋ sync" + " ↓ activity " + " quit " fill the header.
+        let mut app = sort_app(&["a"]);
+        app.state.sort = SortMode::Activity;
+        app.syncing = true;
+        draw(&mut app);
+        assert_eq!(app.sort_hit.right(), app.quit_hit.x);
+        assert_eq!(app.sort_hit.x, 15, "the label starts right after the header text");
+        assert!(app.sort_hit.width > 0, "sort label drawn");
+    }
+
+    #[test]
+    fn reversing_keeps_ties_newest_created_first() {
+        // `notes` is newest-created first: "new" was created after "old".
+        let mut app = sort_app(&["new", "old", "busy"]);
+        app.rt.get_mut("busy").unwrap().tabs.push(tab(ClaudeStatus::Attention, 1, None));
+        app.state.sort = SortMode::Activity;
+        assert_eq!(order(&app), ["busy", "new", "old"]);
+        app.state.sort_reversed = true;
+        assert_eq!(order(&app), ["new", "old", "busy"]);
+
+        for n in &mut app.notes {
+            n.title = if n.id == "busy" { "a".into() } else { "same".into() };
+        }
+        app.state.sort = SortMode::Name;
+        assert_eq!(order(&app), ["new", "old", "busy"]);
+        app.state.sort_reversed = false;
+        assert_eq!(order(&app), ["busy", "new", "old"]);
+    }
+
+    #[test]
+    fn undated_issues_stay_last_in_the_moved_sort() {
+        let mut app = sort_app(&["undated", "early", "late"]);
+        for n in &mut app.notes {
+            n.moved = match n.id.as_str() {
+                "early" => Some("2026-01-01T00:00:00".into()),
+                "late" => Some("2026-02-01T00:00:00".into()),
+                _ => None,
+            };
+        }
+        app.state.sort = SortMode::Moved;
+        assert_eq!(order(&app), ["late", "early", "undated"]);
+        app.state.sort_reversed = true;
+        assert_eq!(order(&app), ["early", "late", "undated"]);
+    }
+
+    #[test]
+    fn sort_label_shows_each_modes_direction() {
+        let mut app = sort_app(&["a"]);
+        for (mode, label, reversed) in [
+            (SortMode::Created, "↓ created", "↑ created"),
+            (SortMode::Id, "↑ id", "↓ id"),
+            (SortMode::Name, "↑ name", "↓ name"),
+            (SortMode::Moved, "↓ moved", "↑ moved"),
+            (SortMode::Activity, "↓ activity", "↑ activity"),
+        ] {
+            app.state.sort = mode;
+            app.state.sort_reversed = false;
+            assert_eq!(app.sort_label(), label);
+            app.state.sort_reversed = true;
+            assert_eq!(app.sort_label(), reversed);
+        }
     }
 
     /// Left-click the issue's row.

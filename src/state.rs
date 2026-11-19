@@ -102,11 +102,17 @@ pub struct State {
     /// Where tabs start on issues with no repo. None means home.
     #[serde(default)]
     pub default_dir: Option<PathBuf>,
-    #[serde(default)]
+    /// Lenient so a mode from a newer build falls back to the default
+    /// instead of failing the whole file.
+    #[serde(default, deserialize_with = "lenient")]
     pub sort: SortMode,
     /// The sort runs the other way round from its own order.
     #[serde(default)]
     pub sort_reversed: bool,
+}
+
+fn lenient<'de, D: serde::Deserializer<'de>, T: Default + serde::de::DeserializeOwned>(d: D) -> Result<T, D::Error> {
+    Ok(serde_json::Value::deserialize(d).ok().and_then(|v| serde_json::from_value(v).ok()).unwrap_or_default())
 }
 
 fn path() -> PathBuf {
@@ -134,10 +140,19 @@ pub fn remove_snapshot(tab: &str) {
 
 impl State {
     pub fn load() -> State {
-        std::fs::read(path())
-            .ok()
-            .and_then(|b| serde_json::from_slice(&b).ok())
-            .unwrap_or_default()
+        State::load_from(&path())
+    }
+
+    /// A file that doesn't parse is moved aside rather than left for the
+    /// next save to overwrite, since it holds the Claude session ids.
+    fn load_from(p: &Path) -> State {
+        let Ok(b) = std::fs::read(p) else { return State::default() };
+        serde_json::from_slice(&b).unwrap_or_else(|e| {
+            let bad = p.with_extension(format!("json.bad-{}", chrono::Local::now().format("%Y%m%d-%H%M%S")));
+            eprintln!("{} doesn't parse ({e}); moved to {}", p.display(), bad.display());
+            let _ = std::fs::rename(p, &bad);
+            State::default()
+        })
     }
 
     pub fn save(&self) {
@@ -186,6 +201,37 @@ mod tests {
         assert!(!st.sort_reversed);
         assert_eq!(st.issues["i"].tabs[0].claude_session.as_deref(), Some("s"));
         assert_eq!(st.issues["i"].tabs[0].cwd, None);
+    }
+
+    #[test]
+    fn an_unknown_sort_falls_back_and_keeps_the_rest() {
+        let json = r#"{"issues":{"i":{"worktree":null,"tabs":[
+            {"id":"t","name":"claude","kind":"claude","claude_session":"s"}
+        ]}},"selected":"i","sort":"bogus","sort_reversed":true}"#;
+        let st: State = serde_json::from_str(json).unwrap();
+        assert_eq!(st.sort, SortMode::Created);
+        assert!(st.sort_reversed);
+        assert_eq!(st.issues["i"].tabs[0].claude_session.as_deref(), Some("s"));
+    }
+
+    #[test]
+    fn a_state_file_that_does_not_parse_is_kept_aside() {
+        let dir = std::env::temp_dir().join(format!("salash-state-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("state.json");
+        std::fs::write(&p, "{not json").unwrap();
+        let st = State::load_from(&p);
+        assert!(st.issues.is_empty());
+        let names: Vec<String> = std::fs::read_dir(&dir).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
+        std::fs::remove_dir_all(&dir).ok();
+        assert!(!names.contains(&"state.json".to_string()), "{names:?}");
+        assert!(names.iter().any(|n| n.starts_with("state.json.bad-")), "{names:?}");
+    }
+
+    #[test]
+    fn a_missing_state_file_loads_the_default() {
+        let st = State::load_from(&std::env::temp_dir().join(format!("salash-none-{}.json", uuid::Uuid::new_v4())));
+        assert!(st.issues.is_empty());
     }
 
     #[test]
