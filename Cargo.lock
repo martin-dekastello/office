@@ -2525,6 +2525,7 @@ dependencies = [
  "rpassword",
  "serde",
  "serde_json",
+ "shell-words",
  "signal-hook",
  "terminal-light",
  "tokio",

@@ -53,6 +53,22 @@ The name comes from the Slovak word *salaš*, a shepherd's hut up in the mountai
 - **Tabs close when their process exits**: quit Claude, `exit` a shell or close the note's
   editor and the tab goes away. A Claude session that exits can still be brought back with
   `R`. Only a Claude that fails to start stays open, so you can read why.
+- **Done and Archive stop the issue's tabs.** Moving an issue there with `d` or `a` stops all
+  its tabs (Claude, shells, note editor) and forgets its saved screens and closed tabs, so
+  finished work holds no memory. First, each Claude session that can be resumed, closed ones
+  included, gets a line under `## Sessions`:
+  `- <date> · stopped · <tab> · `` `cd <dir> && claude --resume <id>` ``. If a tab is busy
+  (Claude working, starting or waiting for you; a shell running a command; an open note
+  editor), salash names it and asks first. A note moved to Done or Archive outside salash, in
+  Obsidian say, gets the same cleanup on the next rescan, except that busy tabs keep running
+  until they are idle. While a note editor is left running, or if the note can't be written,
+  the stopped Claude sessions stay as closed tabs (`R` brings them back) and their lines are
+  written on a later rescan. The lines use your `claude_command`. No new tabs open on a Done
+  or Archive issue: move it back with `u`. The worktree and branch stay.
+- **Resume any session by ID.** `I` asks for a session ID and opens a Claude tab running
+  `claude --resume <id>`, where `c` would start one. Paste the ID, or a whole line from
+  `## Sessions`, whose `cd <dir>` then sets where the tab starts. If the session is already
+  open in a tab, in this issue or another, salash shows that tab instead.
 - **One salash per folder, running in the background**, like a tmux server. `salash ~/work`
   starts it and attaches. Closing the terminal, or `D` to detach, leaves every tab running, and
   `salash --attach ~/work` picks it up again, from another terminal or over ssh. Several people
@@ -279,10 +295,11 @@ dropped, and when there is a tab to type in, the status bar reminds you to press
 | `c` `t` `e` | new Claude / shell / note-editor tab |
 | `` ` `` | go to Scratch, for tabs outside any issue |
 | `z` / `R` | suspend Claude tab / reopen closed Claude tab |
+| `I` | resume a Claude session by ID (or a pasted `claude --resume` line) in a new tab |
 | `C` | new Claude tab in a directory you type (`Tab` completes, empty = issue default) |
 | `p` | set the default directory for issues with no repo (`Tab` completes, empty = keep) |
 | `o` / `w` | open note in Obsidian / issue in browser |
-| `d` `a` `u` `T` | move to done / archive / active / to-do |
+| `d` `a` `u` `T` | move to done / archive (stopping its tabs) / active / to-do |
 | `n` | new local issue |
 | `S` | sync GitHub/Jira |
 | `x` | close tab |
@@ -294,7 +311,7 @@ dropped, and when there is a tab to type in, the status bar reminds you to press
 | `1`–`9`, `h`/`l` | go to tab, previous/next tab |
 | `j` / `k` | next/previous issue |
 | `` ` `` | go to Scratch |
-| `c` `C` `p` `t` `e` `z` `R` `o` `d` `a` `u` `T` `n` `S` | same as in the sidebar |
+| `c` `C` `p` `t` `e` `z` `R` `I` `o` `d` `a` `u` `T` `n` `S` | same as in the sidebar |
 | `x`, `,` | close tab, rename tab |
 | `[` `]` | scroll the tab back/forward (the mouse wheel works too) |
 | `?`, `D`, `q` | help, detach, quit |
@@ -389,7 +406,7 @@ claude mcp add salash -- salash mcp ~/work
 | `get_issue` | one issue with its tabs and its closed tabs (which `R` reopens) |
 | `list_tabs`, `get_tab` | tab id, name, kind, cwd, running/suspended/exited, and for Claude its session, status, last hook event and message, transcript and `claude --resume` command |
 | `read_screen` | what a tab shows, as plain text, like `tmux capture-pane -p`; with `scrollback`, the history above. A suspended tab gives its saved screen. Capped at 2000 lines and 32 KiB |
-| `open_tab` | the same as `salash tab new`: issue, kind, cwd, name, mode, prompt |
+| `open_tab` | the same as `salash tab new`: issue, kind, cwd, name, mode, prompt. Like `tab new`, refused on a Done or Archive issue |
 
 The same comes as resources: `salash://issues`, `salash://issue/{id}`, `salash://tab/{id}` and
 `salash://tab/{id}/screen`. Inside a salash tab, tools without an issue or tab default to the
@@ -466,7 +483,11 @@ src/
   inferred: a busy tab goes idle if no hook follows within 1.5s. After you approve a permission
   prompt the tab stays amber until that tool finishes. A new worktree's trust dialog shows as
   starting (`◌`), not as needing you.
-- Done/archived issues keep their worktree. Remove it with `git worktree remove` when you're done.
+- Done/archived issues keep their worktree, so the `cd` in their resume lines still works.
+  Remove it with `git worktree remove` when you're done.
+- A shell counts as busy while its foreground process group isn't the shell itself, as tmux's
+  `pane_current_command` sees it. A shell that runs everything in one process group (`sh -c`,
+  no job control) always looks idle.
 
 ## License
 

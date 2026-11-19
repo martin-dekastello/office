@@ -7,7 +7,7 @@ use crate::proto::ServerMsg;
 use crate::providers::{self, SyncReport};
 use crate::state::{self, IssueState, SortMode, State, TabKind, TabState};
 use crate::status::{self, ClaudeStatus};
-use crate::term::{Pane, Snapshot};
+use crate::term::{self, Pane, Snapshot};
 use crate::transcript;
 use crate::vault::{NewNote, Note, Stage, Vault};
 use crate::worktree;
@@ -17,7 +17,7 @@ use crossterm::event::{
     MouseEventKind,
 };
 use ratatui::layout::{Position, Rect};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::time::{Duration, Instant};
@@ -43,11 +43,19 @@ pub struct Tab {
     /// Extra Claude arguments for the first launch only (mode, first prompt);
     /// a resumed session never gets them again.
     first_args: Vec<String>,
+    /// The session `I` opened this tab to resume, until its first hook
+    /// records it as `claude_session`.
+    resuming: Option<String>,
 }
 
 impl Tab {
     fn new(st: TabState) -> Tab {
-        Tab { st, pane: None, status: ClaudeStatus::Exited, status_ts: 0, seen_ts: 0, esc_ts: None, exit_check: None, first_args: vec![] }
+        Tab { st, pane: None, status: ClaudeStatus::Exited, status_ts: 0, seen_ts: 0, esc_ts: None, exit_check: None, first_args: vec![], resuming: None }
+    }
+
+    /// The tab runs or holds this Claude session, or is starting it.
+    fn has_session(&self, sid: &str) -> bool {
+        self.st.claude_session.as_deref() == Some(sid) || self.resuming.as_deref() == Some(sid)
     }
 
     /// Status as shown: "Done" turns into "Idle" once the tab has been on view
@@ -111,6 +119,28 @@ impl Tab {
         matches!(self.status, ClaudeStatus::Working | ClaudeStatus::Attention)
     }
 
+    /// What keeps the tab busy, as the confirm before stopping it names it;
+    /// None if stopping it loses nothing under way. A shell is busy while a
+    /// command runs in front of its prompt; an open note editor always is.
+    fn busy_label(&self) -> Option<String> {
+        if !self.running() {
+            return None;
+        }
+        match self.st.kind {
+            TabKind::Claude => match self.status {
+                ClaudeStatus::Working => Some("Claude: working".into()),
+                ClaudeStatus::Starting => Some("Claude: starting".into()),
+                ClaudeStatus::Attention => Some("Claude: waiting for you".into()),
+                _ => None,
+            },
+            TabKind::Shell => {
+                let pid = self.pane.as_ref()?.foreground_pid()?;
+                Some(format!("shell: {}", term::process_name(pid).unwrap_or_else(|| "running command".into())))
+            }
+            TabKind::Notes => Some("note editor".into()),
+        }
+    }
+
     /// True once a pending Esc went unanswered by any hook. A hook after the
     /// Esc means Claude carried on, so the Esc is dropped.
     fn take_interrupt(&mut self, now: i64) -> bool {
@@ -140,6 +170,8 @@ pub struct IssueRt {
     pub tabs: Vec<Tab>,
     pub active: usize,
     pub worktree: Option<PathBuf>,
+    /// Closed Claude tabs for `R`. Only resumable sessions are ever put here
+    /// (`close_tab_at`, `retire_tabs`), so they aren't checked again.
     pub closed: Vec<TabState>,
     pub creating: Option<WorktreeJob>,
     /// Why the worktree script last failed, until it's tried again.
@@ -233,6 +265,7 @@ pub enum PromptKind {
     RenameTab,
     ClaudeDir,
     DefaultDir,
+    ResumeId,
 }
 
 impl PromptKind {
@@ -241,11 +274,13 @@ impl PromptKind {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub enum ConfirmKind {
     Quit,
     CloseTab,
     Suspend,
+    /// Move the issue to Done or Archive, stopping its tabs, `busy` among them.
+    Retire { issue: String, stage: Stage, busy: Vec<String> },
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -318,6 +353,12 @@ pub struct App {
     /// The selected issue and since when (ms, like `seen_ts`): a Done seen
     /// meanwhile keeps its rank, so the list doesn't reorder under the cursor.
     held: Option<(String, i64)>,
+    /// Busy tabs last reported left running on an issue moved to Done or
+    /// Archive outside salash, so the rescan flashes only when that changes.
+    busy_left: HashMap<String, Vec<String>>,
+    /// Issues whose resume lines couldn't be written to the note, so the
+    /// rescan retrying it flashes only the first failure.
+    write_failed: HashSet<String>,
 }
 
 fn now_ms() -> i64 {
@@ -371,6 +412,71 @@ fn claude_argv(
 /// The saved default directory if it still exists, otherwise salash's folder.
 fn usable_default(saved: Option<&Path>, folder: &Path) -> PathBuf {
     saved.filter(|p| p.is_dir()).unwrap_or(folder).to_path_buf()
+}
+
+/// Issues in these stages are finished: their tabs are stopped, and no new ones open.
+fn retires(st: Stage) -> bool {
+    matches!(st, Stage::Done | Stage::Archive)
+}
+
+/// "1 tab", "3 busy tabs".
+pub fn tabs_n(n: usize, adj: &str) -> String {
+    format!("{n} {adj}{}", if n == 1 { "tab" } else { "tabs" })
+}
+
+/// Why an issue's stopped sessions are still in salash and not in its note.
+fn not_written(id: &str, e: &str) -> String {
+    format!("{id}: resume commands not written to the note, sessions kept for R: {e}")
+}
+
+/// A word as the shell reads it back: bare if it's only safe characters,
+/// else quoted. Control characters, which would break the note's line, are
+/// written as escapes in `$'…'`, which bash and zsh read.
+fn shell_word(s: &str) -> String {
+    if !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || "/._-+,:@%".contains(c)) {
+        s.to_string()
+    } else if s.chars().any(char::is_control) {
+        let mut out = String::from("$'");
+        for c in s.chars() {
+            match c {
+                '\\' | '\'' => out.extend(['\\', c]),
+                // \x is the form every shell with `$'…'` reads; \u needs bash 4.2.
+                c if c.is_ascii_control() => out.push_str(&format!("\\x{:02x}", c as u32)),
+                c if c.is_control() => out.push_str(&format!("\\u{:04x}", c as u32)),
+                c => out.push(c),
+            }
+        }
+        out.push('\'');
+        out
+    } else {
+        format!("'{}'", s.replace('\'', r"'\''"))
+    }
+}
+
+/// What was pasted into `I`: the session id itself, or a command holding
+/// `--resume <id>`, such as a `## Sessions` line of the note. The directory
+/// comes from a `cd <dir> &&` in front of it, if there is one.
+fn parse_session_id(input: &str) -> Option<(String, Option<PathBuf>)> {
+    let mut words = input.split_whitespace().map(|w| w.trim_matches('`'));
+    let word = if input.contains("--resume") {
+        words.skip_while(|w| *w != "--resume").nth(1)?
+    } else {
+        let w = words.next()?;
+        if words.next().is_some() {
+            return None;
+        }
+        w
+    };
+    // Claude's ids are hyphenated; the other forms the uuid crate takes aren't ids.
+    let sid = (word.len() == 36).then(|| uuid::Uuid::try_parse(word).ok()).flatten()?.hyphenated().to_string();
+    let dir = input.split_once("&&").and_then(|(before, _)| {
+        let (_, dir) = before.rsplit_once("cd ")?;
+        match shell_words::split(dir).ok()?.as_slice() {
+            [d] => Some(PathBuf::from(d)),
+            _ => None,
+        }
+    });
+    Some((sid, dir))
 }
 
 impl App {
@@ -459,6 +565,16 @@ impl App {
             last_spin: Instant::now(),
             on_view: None,
             held: None,
+            busy_left: HashMap::new(),
+            write_failed: HashSet::new(),
+        }
+    }
+
+    /// The configured Claude command as the note's resume lines write it.
+    fn claude_words(&self) -> String {
+        match self.cfg.claude_command.as_slice() {
+            [] => "claude".into(),
+            cmd => cmd.iter().map(|w| shell_word(w)).collect::<Vec<_>>().join(" "),
         }
     }
 
@@ -577,7 +693,160 @@ impl App {
         if self.selected_note().is_none() && !self.scratch_selected() {
             self.selected = self.rows().first().cloned();
         }
+        self.retire_moved();
         self.last_scan = Instant::now();
+    }
+
+    /// The issue is in Done or Archive. Scratch never is.
+    fn retired(&self, id: &str) -> bool {
+        self.notes.iter().any(|n| n.id == id && retires(n.stage))
+    }
+
+    /// Say so and return true if the issue is in Done or Archive, where no tab opens.
+    fn refuse_retired(&mut self, id: &str) -> bool {
+        let retired = self.retired(id);
+        if retired {
+            self.flash("Move to Active first (u)".into());
+        }
+        retired
+    }
+
+    /// The issue has tabs or closed tabs, loaded or only saved.
+    fn has_tabs(&self, id: &str) -> bool {
+        match self.rt.get(id) {
+            Some(rt) => !rt.tabs.is_empty() || !rt.closed.is_empty(),
+            None => self.state.issues.get(id).is_some_and(|s| !s.tabs.is_empty() || !s.closed.is_empty()),
+        }
+    }
+
+    /// Stop the tabs of issues moved to Done or Archive outside salash (in
+    /// Obsidian, or before salash did it on a move). Nobody confirmed that,
+    /// so busy tabs keep running, and a later rescan stops them once idle.
+    fn retire_moved(&mut self) {
+        let notes: Vec<Note> = self.notes.iter().filter(|n| retires(n.stage) && self.has_tabs(&n.id)).cloned().collect();
+        self.busy_left.retain(|id, _| notes.iter().any(|n| &n.id == id));
+        self.write_failed.retain(|id| notes.iter().any(|n| &n.id == id));
+        let (mut touched_selected, mut said, mut failed) = (false, vec![], false);
+        for note in notes {
+            let (stopped, busy, error) = self.retire_tabs(&note, false);
+            touched_selected |= stopped > 0 && self.selected.as_deref() == Some(note.id.as_str());
+            let stage = note.stage.label();
+            if let Some(e) = error {
+                if self.write_failed.insert(note.id.clone()) {
+                    self.flash_error(not_written(&note.id, &e));
+                    failed = true;
+                }
+                continue;
+            }
+            self.write_failed.remove(&note.id);
+            if busy.is_empty() {
+                self.busy_left.remove(&note.id);
+                if stopped > 0 {
+                    said.push(format!("{} is in {stage}: {} stopped", note.id, tabs_n(stopped, "")));
+                }
+            } else if self.busy_left.get(&note.id) != Some(&busy) {
+                said.push(format!(
+                    "{} is in {stage}: left {} running ({}), stopped once idle",
+                    note.id,
+                    tabs_n(busy.len(), "busy "),
+                    busy.join(", ")
+                ));
+                self.busy_left.insert(note.id.clone(), busy);
+            }
+        }
+        // One message for all, so one issue's doesn't hide another's; a failure goes first.
+        if !said.is_empty() && !failed {
+            self.flash(said.join("; "));
+        }
+        // Only when a tab on view went; a tab waiting for its worktree keeps focus.
+        if touched_selected {
+            self.after_issue_switch();
+        }
+    }
+
+    /// Stop an issue's tabs as it goes to Done or Archive. First each Claude
+    /// session, closed ones included, gets a line in the note to resume it by;
+    /// then saved screens and the closed tabs go too. Unless `force`, busy tabs
+    /// keep running. If the lines can't be written, or a kept note editor
+    /// would save over them, the sessions are kept as closed tabs instead, for
+    /// `R` and a later try. Returns how many tabs stopped, what keeps the rest
+    /// busy, and why writing the note failed.
+    fn retire_tabs(&mut self, note: &Note, force: bool) -> (usize, Vec<String>, Option<String>) {
+        let rt = self.rt_for(&note.id);
+        let active = rt.tabs.get(rt.active).map(|t| t.st.id.clone());
+        let (mut keep, mut stop, mut busy) = (vec![], vec![], vec![]);
+        for t in std::mem::take(&mut rt.tabs) {
+            match t.busy_label().filter(|_| !force) {
+                Some(b) => {
+                    busy.push(b);
+                    keep.push(t);
+                }
+                None => stop.push(t),
+            }
+        }
+        let mut closed = std::mem::take(&mut rt.closed);
+        let had_closed = !closed.is_empty();
+        let worktree = rt.worktree.clone();
+        // Read before the status files go: a session with no messages can't be resumed.
+        let (sessions, others): (Vec<Tab>, Vec<Tab>) =
+            stop.into_iter().partition(|t| t.st.kind == TabKind::Claude && t.resumable());
+        let stopped = sessions.len() + others.len();
+
+        let when = chrono::Local::now().format("%Y-%m-%d %H:%M");
+        let claude = self.claude_words();
+        let mut seen = HashSet::new();
+        let mut lines = vec![];
+        for st in sessions.iter().map(|t| &t.st).chain(&closed) {
+            let Some(sid) = st.claude_session.as_deref().filter(|s| seen.insert(s.to_string())) else { continue };
+            // A tab started in the worktree keeps no directory of its own.
+            let cmd = match st.cwd.as_ref().or(worktree.as_ref()) {
+                Some(dir) => format!("cd {} && {claude} --resume {sid}", shell_word(&dir.to_string_lossy())),
+                None => format!("{claude} --resume {sid}"),
+            };
+            lines.push(format!("- {when} · stopped · {} · `{cmd}`", st.name));
+        }
+        let editor_open = keep.iter().any(|t| t.st.kind == TabKind::Notes);
+        let mut error = None;
+        let written = !editor_open
+            && (lines.is_empty()
+                || match self.vault.append_session_lines(note, &lines) {
+                    Ok(()) => true,
+                    Err(e) => {
+                        error = Some(format!("{e:#}"));
+                        false
+                    }
+                });
+        if written {
+            for st in &closed {
+                state::remove_snapshot(&st.id);
+            }
+            closed.clear();
+        }
+        for t in &sessions {
+            if written {
+                state::remove_snapshot(&t.st.id);
+            } else {
+                t.save_screen();
+            }
+            status::clear_status(&t.st.id);
+        }
+        for t in &others {
+            status::clear_status(&t.st.id);
+            state::remove_snapshot(&t.st.id);
+        }
+        if !written {
+            // Not trimmed to MAX_CLOSED: none of these is in the note yet.
+            closed.extend(sessions.iter().map(|t| t.st.clone()));
+        }
+        let changed = stopped > 0 || written && had_closed;
+        let rt = self.rt_for(&note.id);
+        rt.tabs = keep;
+        rt.active = active.and_then(|a| rt.tabs.iter().position(|t| t.st.id == a)).unwrap_or(0);
+        rt.closed = closed;
+        if changed {
+            self.persist(&note.id);
+        }
+        (stopped, busy, error)
     }
 
     fn select_id(&mut self, id: String) {
@@ -614,14 +883,45 @@ impl App {
         }
     }
 
+    /// Move the selected issue. Done and Archive stop its tabs, asking first
+    /// if any of them is busy.
     fn move_stage(&mut self, st: Stage) {
-        let Some(note) = self.selected_note().cloned() else { return };
+        let Some(id) = self.selected_note().map(|n| n.id.clone()) else { return };
+        if retires(st) {
+            let busy: Vec<String> = self.rt_for(&id).tabs.iter().filter_map(Tab::busy_label).collect();
+            if !busy.is_empty() {
+                self.mode = Mode::Confirm(ConfirmKind::Retire { issue: id, stage: st, busy });
+                return;
+            }
+        }
+        self.do_move_stage(&id, st);
+    }
+
+    fn do_move_stage(&mut self, id: &str, st: Stage) {
+        let Some(note) = self.notes.iter().find(|n| n.id == id).cloned() else { return };
         // Pick the neighbour before moving, so the cursor stays in place.
         let ids = self.rows();
         let pos = ids.iter().position(|i| i == &note.id).unwrap_or(0);
         match self.vault.move_to(&note, st) {
-            Ok(_) => {
-                self.flash(format!("{} → {}", note.id, st.label()));
+            Ok(moved) => {
+                let mut msg = format!("{} → {}", note.id, st.label());
+                // Before the rescan, which would leave busy tabs running.
+                let mut error = None;
+                if retires(st) {
+                    let (stopped, _, e) = self.retire_tabs(&moved, true);
+                    if stopped > 0 {
+                        msg.push_str(&format!(" · {} stopped", tabs_n(stopped, "")));
+                    }
+                    error = e;
+                }
+                match error {
+                    Some(e) => {
+                        // The rescan below tries again; it needn't say so twice.
+                        self.write_failed.insert(id.to_string());
+                        self.flash_error(format!("{msg} · {}", not_written(id, &e)));
+                    }
+                    None => self.flash(msg),
+                }
                 self.rescan();
                 let next = ids
                     .get(pos + 1)
@@ -848,7 +1148,7 @@ impl App {
     fn spawn_pane(&mut self, id: &str, idx: usize) {
         // Only Scratch has no note.
         let note = self.notes.iter().find(|n| n.id == id).cloned();
-        if note.is_none() && id != SCRATCH {
+        if (note.is_none() && id != SCRATCH) || self.refuse_retired(id) {
             return;
         }
         let Some(tab) = self.rt_for(id).tabs.get(idx) else { return };
@@ -952,6 +1252,9 @@ impl App {
             self.flash("Scratch has no note".into());
             return;
         }
+        if self.refuse_retired(&id) {
+            return;
+        }
         if kind == TabKind::Claude {
             self.start_work(&id);
         }
@@ -1017,6 +1320,8 @@ impl App {
             }
         } else if !self.notes.iter().any(|n| n.id == req.issue) {
             return Reply::err(format!("no issue {}", req.issue));
+        } else if self.retired(&req.issue) {
+            return Reply::err(format!("{} is finished (Done or Archive): Move to Active first (u)", req.issue));
         }
         let args = if req.kind == TabKind::Claude { req.claude_args() } else { vec![] };
         let tab = self.add_tab(&req.issue, req.kind, req.name.clone(), req.cwd.clone(), args, false);
@@ -1062,6 +1367,70 @@ impl App {
             self.flash(format!("Not a directory: {dir}"));
             self.mode = Mode::Prompt(PromptKind::ClaudeDir, input);
         }
+    }
+
+    /// Open a Claude tab on the selected issue running `claude --resume <id>`,
+    /// where `c` would start one, or in the directory a pasted `cd` names.
+    /// A session already in a tab, in any issue, is only shown, and one
+    /// closed on this issue comes back as it was.
+    fn resume_session(&mut self, input: String) {
+        let Some((sid, dir)) = parse_session_id(&input) else {
+            self.flash(format!("Not a session ID: {}", input.trim()));
+            self.mode = Mode::Prompt(PromptKind::ResumeId, input);
+            return;
+        };
+        let Some(id) = self.selected.clone() else { return };
+        if self.refuse_retired(&id) {
+            return;
+        }
+        if let Some((issue, idx)) = self.find_session(&sid) {
+            if issue != id {
+                if let Some(stage) = self.notes.iter().find(|n| n.id == issue).map(|n| n.stage) {
+                    self.view = stage;
+                }
+                self.select_id(issue.clone());
+            }
+            self.switch_tab(idx);
+            self.view_tab();
+            self.flash(if issue == id { "That session is open in this tab".into() } else { format!("That session is open in {issue}") });
+            return;
+        }
+        self.msg = None;
+        self.start_work(&id);
+        let rt = self.rt_for(&id);
+        // A closed tab comes back as it was: its name, directory and saved screen.
+        if let Some(i) = rt.closed.iter().position(|st| st.claude_session.as_deref() == Some(sid.as_str())) {
+            rt.tabs.push(Tab::new(rt.closed.remove(i)));
+            rt.active = rt.tabs.len() - 1;
+            let idx = rt.active;
+            self.persist(&id);
+            self.spawn_pane(&id, idx);
+        } else {
+            // A new tab as `c` opens, so it starts in the same directory, and
+            // its first hook records the session and writes its Sessions line.
+            let cwd = dir.filter(|d| d.is_dir());
+            let tab = self.add_tab(&id, TabKind::Claude, None, cwd, vec!["--resume".into(), sid.clone()], true);
+            if let Some(t) = self.rt_for(&id).tabs.iter_mut().find(|t| t.st.id == tab) {
+                t.resuming = Some(sid);
+            }
+        }
+        self.focus = Focus::Terminal;
+    }
+
+    /// The issue and tab holding a Claude session, saved tabs of issues not
+    /// loaded yet included.
+    fn find_session(&mut self, sid: &str) -> Option<(String, usize)> {
+        let saved: Vec<String> = self
+            .state
+            .issues
+            .iter()
+            .filter(|(id, s)| !self.rt.contains_key(*id) && s.tabs.iter().any(|t| t.claude_session.as_deref() == Some(sid)))
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in saved {
+            self.rt_for(&id);
+        }
+        self.rt.iter().find_map(|(id, rt)| Some((id.clone(), rt.tabs.iter().position(|t| t.has_session(sid))?)))
     }
 
     /// Save a typed directory as the app's default; empty keeps the current one.
@@ -1170,6 +1539,9 @@ impl App {
     /// Bring back the most recently closed Claude tab, still suspended.
     fn reopen_tab(&mut self) {
         let Some(id) = self.selected.clone() else { return };
+        if self.refuse_retired(&id) {
+            return;
+        }
         let rt = self.rt_for(&id);
         let Some(st) = rt.closed.pop() else {
             self.flash("No closed Claude tabs for this issue".into());
@@ -1395,10 +1767,8 @@ impl App {
         for (issue, sid, name) in new_sessions {
             if let Some(note) = self.notes.iter().find(|n| n.id == issue).cloned() {
                 let when = chrono::Local::now().format("%Y-%m-%d %H:%M");
-                let _ = self.vault.append_session_line(
-                    &note,
-                    &format!("- {when} · {name} · `claude --resume {sid}`"),
-                );
+                let claude = self.claude_words();
+                let _ = self.vault.append_session_lines(&note, &[format!("- {when} · {name} · `{claude} --resume {sid}`")]);
             }
             self.persist(&issue);
         }
@@ -1645,6 +2015,7 @@ impl App {
                         ConfirmKind::Quit => self.quit = true,
                         ConfirmKind::CloseTab => self.close_tab(),
                         ConfirmKind::Suspend => self.suspend_tab(),
+                        ConfirmKind::Retire { issue, stage, .. } => self.do_move_stage(&issue, stage),
                     }
                 }
             }
@@ -1659,6 +2030,7 @@ impl App {
                             PromptKind::RenameTab => self.rename_tab(buf),
                             PromptKind::ClaudeDir => self.new_claude_in(buf),
                             PromptKind::DefaultDir => self.set_default_dir(kind, buf),
+                            PromptKind::ResumeId => self.resume_session(buf),
                         }
                     }
                     KeyCode::Tab | KeyCode::BackTab if kind.is_dir() => {
@@ -1791,13 +2163,14 @@ impl App {
     fn on_command(&mut self, k: KeyEvent) -> bool {
         match k.code {
             KeyCode::Char('c') => self.new_tab(TabKind::Claude),
-            KeyCode::Char('C') => {
-                if self.selected.is_some() {
-                    self.mode = Mode::Prompt(PromptKind::ClaudeDir, String::new());
-                } else {
-                    self.flash("Select an issue first".into());
+            KeyCode::Char(c @ ('C' | 'I')) => match self.selected.clone() {
+                None => self.flash("Select an issue first".into()),
+                Some(id) if self.refuse_retired(&id) => {}
+                Some(_) => {
+                    let kind = if c == 'C' { PromptKind::ClaudeDir } else { PromptKind::ResumeId };
+                    self.mode = Mode::Prompt(kind, String::new());
                 }
-            }
+            },
             KeyCode::Char('p') => self.mode = Mode::Prompt(PromptKind::DefaultDir, String::new()),
             KeyCode::Char('t') => self.new_tab(TabKind::Shell),
             KeyCode::Char('e') => self.new_tab(TabKind::Notes),
@@ -2905,5 +3278,466 @@ mod tests {
         app.rt.get_mut("A-1").unwrap().tabs.clear();
         let d = diff(&renamed, &fingerprints(&app));
         assert!(d.list && d.uris.contains(&"salash://tab/t".to_string()), "{d:?}");
+    }
+
+    // ---------- #28: Done and Archive stop their tabs ----------
+
+    const S1: &str = "11111111-1111-4111-8111-111111111111";
+    const S2: &str = "22222222-2222-4222-8222-222222222222";
+
+    /// A tab of `kind` with a fresh id, so its status file and snapshot are its own.
+    fn fresh(kind: TabKind, session: Option<&str>, cwd: Option<&str>) -> Tab {
+        let mut t = unstarted_tab();
+        t.st.id = uuid::Uuid::new_v4().to_string();
+        t.st.kind = kind;
+        t.st.claude_session = session.map(Into::into);
+        t.st.cwd = cwd.map(PathBuf::from);
+        t
+    }
+
+    /// A tab of `kind` whose pane runs `sleep` with no command in front of it.
+    fn live(kind: TabKind, dir: &Path) -> Tab {
+        let mut t = running_tab(dir);
+        t.st.id = uuid::Uuid::new_v4().to_string();
+        t.st.kind = kind;
+        t
+    }
+
+    fn key(app: &mut App, c: char) {
+        app.on_sidebar_key(KeyEvent::from(KeyCode::Char(c)));
+    }
+
+    fn answer(app: &mut App, c: char) {
+        app.handle(Event::Key(KeyEvent::from(KeyCode::Char(c))));
+    }
+
+    fn note_of(app: &App, id: &str) -> Note {
+        app.notes.iter().find(|n| n.id == id).cloned().expect("note")
+    }
+
+    fn note_text(app: &App, id: &str) -> String {
+        std::fs::read_to_string(&note_of(app, id).path).unwrap()
+    }
+
+    fn flashed(app: &App) -> String {
+        app.msg.as_ref().map(|m| m.0.clone()).unwrap_or_default()
+    }
+
+    #[test]
+    fn done_stops_idle_tabs_and_keeps_resume_commands_in_the_note() {
+        let (mut app, vault) = click_app(&["a", "b"]);
+        app.cfg.claude_command = vec!["claude".into()];
+        let suspended = fresh(TabKind::Claude, Some(S1), Some("/work/my repo"));
+        let no_session = fresh(TabKind::Claude, None, None);
+        let shell = live(TabKind::Shell, &vault.0);
+        let shell_pid = shell.pane.as_ref().unwrap().pid().unwrap();
+        let ids: Vec<String> = [&suspended, &no_session, &shell].iter().map(|t| t.st.id.clone()).collect();
+        with_tabs(&mut app, "a", vec![suspended, no_session, shell], 2);
+        let closed_id = uuid::Uuid::new_v4().to_string();
+        {
+            let rt = app.rt.get_mut("a").unwrap();
+            rt.worktree = Some(PathBuf::from("/wt/a"));
+            let mut st = fresh(TabKind::Claude, Some(S2), None).st;
+            st.id = closed_id.clone();
+            st.name = "old".into();
+            rt.closed.push(st);
+            // The same session closed twice is written once.
+            rt.closed.push(fresh(TabKind::Claude, Some(S1), None).st);
+        }
+        state::write_snapshot(&ids[0], b"screen");
+        state::write_snapshot(&closed_id, b"screen");
+        app.select_id("a".into());
+
+        key(&mut app, 'd');
+        assert!(app.mode == Mode::Normal, "idle tabs need no confirmation");
+        assert_eq!(note_of(&app, "a").stage, Stage::Done);
+        assert_eq!(flashed(&app), "a → Done · 3 tabs stopped");
+        assert!(app.rt["a"].tabs.is_empty() && app.rt["a"].closed.is_empty());
+        let saved = &app.state.issues["a"];
+        assert!(saved.tabs.is_empty() && saved.closed.is_empty(), "persisted, so they don't come back");
+        assert_eq!(saved.worktree.as_deref(), Some(Path::new("/wt/a")), "the worktree stays");
+        assert!(!state::snapshot_path(&ids[0]).exists() && !state::snapshot_path(&closed_id).exists());
+        // The shell is gone: kill(0) on a reaped pid fails.
+        assert_ne!(unsafe { libc::kill(shell_pid as i32, 0) }, 0, "shell still running");
+
+        let text = note_text(&app, "a");
+        assert!(text.contains(&format!(" · stopped · claude · `cd '/work/my repo' && claude --resume {S1}`")), "{text}");
+        assert!(text.contains(&format!(" · stopped · old · `cd /wt/a && claude --resume {S2}`")), "{text}");
+        assert_eq!(text.matches("--resume").count(), 2, "one line per session, none without one: {text}");
+    }
+
+    #[test]
+    fn busy_tabs_are_named_and_no_leaves_everything_as_it_was() {
+        let (mut app, vault) = click_app(&["a"]);
+        let mut claude = live(TabKind::Claude, &vault.0);
+        claude.status = ClaudeStatus::Working;
+        let editor = live(TabKind::Notes, &vault.0);
+        let idle = fresh(TabKind::Claude, None, None);
+        with_tabs(&mut app, "a", vec![claude, editor, idle], 0);
+        app.select_id("a".into());
+
+        key(&mut app, 'd');
+        let Mode::Confirm(ConfirmKind::Retire { issue, stage, busy }) = app.mode.clone() else { panic!("no confirm") };
+        assert_eq!((issue.as_str(), stage), ("a", Stage::Done));
+        assert_eq!(busy, ["Claude: working", "note editor"]);
+        let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 30)).unwrap();
+        term.draw(|f| crate::ui::draw(&mut app, f)).unwrap();
+        let screen: String = term.backend().buffer().content().iter().map(|c| c.symbol()).collect();
+        assert!(screen.contains("Stop 2 busy tabs (Claude: working, note"), "{screen}");
+
+        answer(&mut app, 'n');
+        assert!(app.mode == Mode::Normal);
+        assert_eq!(note_of(&app, "a").stage, Stage::Active);
+        assert_eq!(app.rt["a"].tabs.len(), 3);
+        assert!(app.rt["a"].tabs[0].running());
+
+        key(&mut app, 'a');
+        assert!(matches!(app.mode, Mode::Confirm(ConfirmKind::Retire { stage: Stage::Archive, .. })));
+        answer(&mut app, 'y');
+        assert_eq!(note_of(&app, "a").stage, Stage::Archive);
+        assert!(app.rt["a"].tabs.is_empty());
+        assert_eq!(flashed(&app), "a → Archive · 3 tabs stopped");
+    }
+
+    #[test]
+    fn a_failed_move_stops_nothing() {
+        let (mut app, vault) = click_app(&["a"]);
+        with_tabs(&mut app, "a", vec![fresh(TabKind::Claude, Some(S1), None)], 0);
+        app.select_id("a".into());
+        let path = note_of(&app, "a").path;
+        let done = path.parent().unwrap().parent().unwrap().join(Stage::Done.dir());
+        assert!(done.starts_with(&vault.0));
+        std::fs::create_dir_all(&done).unwrap();
+        std::fs::write(done.join(path.file_name().unwrap()), "taken").unwrap();
+
+        key(&mut app, 'd');
+        assert!(flashed(&app).starts_with("Move failed"), "{}", flashed(&app));
+        assert_eq!(app.rt["a"].tabs.len(), 1);
+        assert!(!note_text(&app, "a").contains("stopped"));
+    }
+
+    #[test]
+    fn moving_back_brings_no_tabs_and_done_to_archive_has_none_to_stop() {
+        let (mut app, _vault) = click_app(&["a"]);
+        with_tabs(&mut app, "a", vec![fresh(TabKind::Claude, Some(S1), None)], 0);
+        app.select_id("a".into());
+        key(&mut app, 'd');
+        app.set_view(Stage::Done);
+        app.select_id("a".into());
+        key(&mut app, 'a');
+        assert_eq!(flashed(&app), "a → Archive", "no tabs left to stop");
+        app.set_view(Stage::Archive);
+        app.select_id("a".into());
+        key(&mut app, 'u');
+        assert_eq!(note_of(&app, "a").stage, Stage::Active);
+        assert!(app.rt["a"].tabs.is_empty() && app.rt["a"].closed.is_empty());
+    }
+
+    #[test]
+    fn a_move_made_outside_salash_stops_idle_tabs_and_leaves_busy_ones() {
+        let (mut app, vault) = click_app(&["a", "b"]);
+        let tabs = vec![fresh(TabKind::Claude, Some(S1), None), live(TabKind::Shell, &vault.0), live(TabKind::Notes, &vault.0)];
+        with_tabs(&mut app, "a", tabs, 0);
+        // "b" was never loaded: its tabs are only saved, as after a restart.
+        app.state.issues.insert("b".into(), IssueState { tabs: vec![fresh(TabKind::Shell, None, None).st], ..Default::default() });
+        for id in ["a", "b"] {
+            app.vault.move_to(&note_of(&app, id), Stage::Done).unwrap();
+        }
+
+        app.rescan();
+        let rt = &app.rt["a"];
+        assert_eq!(rt.tabs.len(), 1, "only the editor is left");
+        assert_eq!(rt.tabs[0].st.kind, TabKind::Notes);
+        // The editor would save over a line written under it, so the session waits in closed.
+        assert!(!note_text(&app, "a").contains("--resume"));
+        assert_eq!(rt.closed.iter().map(|st| st.claude_session.as_deref()).collect::<Vec<_>>(), [Some(S1)]);
+        assert!(app.state.issues["b"].tabs.is_empty(), "saved leftovers go too");
+        assert_eq!(app.busy_left["a"], ["note editor"]);
+        let m = flashed(&app);
+        assert!(m.contains("a is in Done: left 1 busy tab running (note editor), stopped once idle") && m.contains("b is in Done: 1 tab stopped"), "{m}");
+
+        // Busy tabs are retried every rescan, but said only once.
+        app.msg = None;
+        app.rescan();
+        assert!(app.msg.is_none(), "flashed again: {}", flashed(&app));
+        assert_eq!(app.rt["a"].tabs.len(), 1);
+
+        // Once the editor quits, the next rescan stops it and writes the line.
+        let p = app.rt.get_mut("a").unwrap().tabs[0].pane.as_mut().unwrap();
+        p.kill();
+        let start = Instant::now();
+        while !p.poll_exit() {
+            assert!(start.elapsed() < Duration::from_secs(5));
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        app.rescan();
+        assert!(app.rt["a"].tabs.is_empty() && app.rt["a"].closed.is_empty());
+        assert_eq!(flashed(&app), "a is in Done: 1 tab stopped");
+        assert_eq!(note_text(&app, "a").matches(&format!("--resume {S1}")).count(), 1);
+        assert!(app.busy_left.is_empty());
+    }
+
+    #[test]
+    fn a_note_that_cant_be_written_keeps_the_sessions() {
+        use std::os::unix::fs::PermissionsExt;
+        let (mut app, vault) = click_app(&["a"]);
+        let mut claude = live(TabKind::Claude, &vault.0);
+        claude.st.claude_session = Some(S1.into());
+        let tab_id = claude.st.id.clone();
+        with_tabs(&mut app, "a", vec![claude], 0);
+        app.select_id("a".into());
+        let path = note_of(&app, "a").path;
+        // The move renames the file and rewrites it first, so lock it after.
+        app.vault.move_to(&note_of(&app, "a"), Stage::Done).unwrap();
+        app.notes = app.vault.scan();
+        let path = path.parent().unwrap().parent().unwrap().join(Stage::Done.dir()).join(path.file_name().unwrap());
+        let mode = |m| std::fs::set_permissions(&path, std::fs::Permissions::from_mode(m)).unwrap();
+        mode(0o444);
+
+        app.rescan();
+        let rt = &app.rt["a"];
+        assert!(rt.tabs.is_empty(), "stopped all the same");
+        assert_eq!(rt.closed.len(), 1, "kept for R");
+        assert_eq!(rt.closed[0].id, tab_id);
+        assert_eq!(app.state.issues["a"].closed.len(), 1, "persisted");
+        assert!(state::snapshot_path(&tab_id).exists(), "its screen is kept");
+        assert!(app.msg_error && flashed(&app).contains("not written"), "{}", flashed(&app));
+
+        // Retried every rescan, said once.
+        app.msg = None;
+        app.rescan();
+        assert!(app.msg.is_none(), "flashed again: {}", flashed(&app));
+
+        mode(0o644);
+        app.rescan();
+        assert!(app.rt["a"].closed.is_empty());
+        assert!(note_text(&app, "a").contains(&format!("--resume {S1}")));
+        assert!(!state::snapshot_path(&tab_id).exists());
+    }
+
+    #[test]
+    fn a_rescan_leaves_a_tab_waiting_for_its_worktree_focused() {
+        let (mut app, _vault) = click_app(&["a"]);
+        let t = fresh(TabKind::Claude, None, None);
+        let (_tx, rx) = mpsc::channel();
+        let waiting = vec![t.st.id.clone()];
+        app.rt.insert("a".into(), IssueRt { tabs: vec![t], creating: Some(WorktreeJob { rx, waiting, fallback: None }), ..Default::default() });
+        app.select_id("a".into());
+        app.focus = Focus::Terminal;
+        app.rescan();
+        assert_eq!(app.focus, Focus::Terminal);
+    }
+
+    #[test]
+    fn nothing_new_opens_on_a_finished_issue() {
+        let (mut app, _vault) = click_app(&["a"]);
+        app.vault.move_to(&note_of(&app, "a"), Stage::Done).unwrap();
+        app.rescan();
+        app.set_view(Stage::Done);
+        app.select_id("a".into());
+        for c in ['c', 'C', 't', 'e', 'I', 'R'] {
+            app.msg = None;
+            key(&mut app, c);
+            assert_eq!(flashed(&app), "Move to Active first (u)", "key {c}");
+            assert!(app.mode == Mode::Normal, "key {c}");
+        }
+        app.open_issue();
+        assert!(app.rt["a"].tabs.is_empty());
+        let req = Request { issue: "a".into(), kind: TabKind::Shell, cwd: None, name: None, mode: None, prompt: None };
+        let reply = app.open_requested(req);
+        assert!(!reply.ok && reply.error.unwrap().contains("Move to Active first"));
+        // The note and the issue's page still open.
+        key(&mut app, 'o');
+        assert!(matches!(app.outbox.last(), Some(ServerMsg::Open(u)) if u.starts_with("obsidian://")));
+    }
+
+    #[test]
+    fn a_session_id_is_read_from_what_was_pasted() {
+        let id = S1;
+        for ok in [
+            id.to_string(),
+            format!("  {id}\t"),
+            id.to_uppercase(),
+            format!("claude --resume {id}"),
+            format!("`cd /x && claude --resume {id}`"),
+            format!("- 2026-11-19 10:00 · stopped · claude · `cd /x && claude --resume {id}`"),
+        ] {
+            assert_eq!(parse_session_id(&ok).map(|(s, _)| s).as_deref(), Some(id), "{ok}");
+        }
+        for bad in ["", "   ", "hello", "11111111111141118111111111111111", "claude --resume", &format!("{id} {id}"), "{11111111-1111-4111-8111-111111111111}"] {
+            assert_eq!(parse_session_id(bad), None, "{bad}");
+        }
+        let dir = |input: &str| parse_session_id(input).and_then(|(_, d)| d);
+        assert_eq!(dir(S1), None);
+        assert_eq!(dir(&format!("claude --resume {S1}")), None);
+        assert_eq!(dir(&format!("- x · stopped · claude · `cd /wt/a && claude --resume {S1}`")), Some(PathBuf::from("/wt/a")));
+        assert_eq!(dir(&format!("`cd '/my dir/it'\\''s' && claude --resume {S1}`")), Some(PathBuf::from("/my dir/it's")));
+    }
+
+    fn resume(app: &mut App, input: &str) {
+        app.mode = Mode::Prompt(PromptKind::ResumeId, String::new());
+        app.on_paste(input.into());
+        app.handle(Event::Key(KeyEvent::from(KeyCode::Enter)));
+    }
+
+    #[test]
+    fn resuming_an_open_session_shows_its_tab() {
+        let (mut app, _vault) = click_app(&["a"]);
+        with_tabs(&mut app, "a", vec![fresh(TabKind::Shell, None, None), fresh(TabKind::Claude, Some(S1), None)], 0);
+        app.select_id("a".into());
+        resume(&mut app, &format!("claude --resume {S1}"));
+        assert_eq!(app.rt["a"].tabs.len(), 2, "no second tab");
+        assert_eq!(app.rt["a"].active, 1);
+        assert_eq!(app.focus, Focus::Terminal);
+        assert!(app.rt["a"].tabs[1].pane.is_none(), "shown, not started");
+    }
+
+    #[test]
+    fn resuming_a_closed_session_brings_its_tab_back() {
+        let (mut app, _vault) = click_app(&["a"]);
+        with_tabs(&mut app, "a", vec![], 0);
+        let st = fresh(TabKind::Claude, Some(S1), Some("/nonexistent/dir")).st;
+        app.rt.get_mut("a").unwrap().closed.push(st.clone());
+        app.select_id("a".into());
+        resume(&mut app, S1);
+        let rt = &app.rt["a"];
+        assert!(rt.closed.is_empty());
+        assert_eq!(rt.tabs.len(), 1);
+        assert_eq!(rt.tabs[0].st.id, st.id);
+    }
+
+    #[test]
+    fn resuming_by_id_opens_a_claude_tab_and_starts_work() {
+        let (mut app, vault) = click_app(&["a"]);
+        // "claude" records its arguments.
+        let argv = vault.0.join("argv");
+        app.cfg.claude_command = vec!["sh".into(), "-c".into(), format!("echo \"$@\" > '{}'", argv.display()), "sh".into()];
+        app.vault.move_to(&note_of(&app, "a"), Stage::Todo).unwrap();
+        app.rescan();
+        app.set_view(Stage::Todo);
+        app.select_id("a".into());
+
+        resume(&mut app, "not an id");
+        assert!(flashed(&app).starts_with("Not a session ID"));
+        assert!(app.mode == Mode::Prompt(PromptKind::ResumeId, "not an id".into()), "the prompt stays to fix it");
+        assert!(app.rt["a"].tabs.is_empty());
+        app.mode = Mode::Normal;
+
+        resume(&mut app, S2);
+        assert_eq!(note_of(&app, "a").stage, Stage::Active, "like c, it starts work");
+        let t = &app.rt["a"].tabs[0];
+        assert_eq!(t.st.kind, TabKind::Claude);
+        assert_eq!(t.st.claude_session, None, "set by its first hook, which writes the Sessions line");
+        assert_eq!(t.st.cwd.as_deref(), Some(app.default_dir().as_path()), "where c starts, not home");
+        assert_eq!(app.focus, Focus::Terminal);
+        let start = Instant::now();
+        while !std::fs::read_to_string(&argv).is_ok_and(|a| a.trim_end().ends_with(&format!("--resume {S2}"))) {
+            assert!(start.elapsed() < Duration::from_secs(5), "{:?}", std::fs::read_to_string(&argv));
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    #[test]
+    fn scratch_can_resume_a_session() {
+        let (mut app, _vault) = click_app(&["a"]);
+        app.select_id(SCRATCH.into());
+        key(&mut app, 'I');
+        assert!(app.mode == Mode::Prompt(PromptKind::ResumeId, String::new()));
+        app.mode = Mode::Normal;
+        resume(&mut app, S1);
+        assert_eq!(app.rt[SCRATCH].tabs.len(), 1);
+        assert_eq!(app.rt[SCRATCH].tabs[0].st.kind, TabKind::Claude);
+    }
+
+    #[test]
+    fn a_shell_word_is_quoted_only_when_it_must_be() {
+        assert_eq!(shell_word("/a/b-c_d.e"), "/a/b-c_d.e");
+        assert_eq!(shell_word("/a b"), "'/a b'");
+        assert_eq!(shell_word("/it's"), r"'/it'\''s'");
+        // A newline would end the note's line; the shell reads the escape back.
+        assert_eq!(shell_word("/a\nb\t'c\\"), r"$'/a\x0ab\x09\'c\\'");
+        assert!(!shell_word("/a\nb").contains('\n'));
+    }
+
+    #[test]
+    fn the_note_line_uses_the_configured_claude_command() {
+        let (mut app, _vault) = click_app(&["a"]);
+        app.cfg.claude_command = vec!["npx".into(), "claude code".into()];
+        with_tabs(&mut app, "a", vec![fresh(TabKind::Claude, Some(S1), Some("/w"))], 0);
+        app.select_id("a".into());
+        key(&mut app, 'd');
+        assert!(note_text(&app, "a").contains(&format!("`cd /w && npx 'claude code' --resume {S1}`")), "{}", note_text(&app, "a"));
+    }
+
+    #[test]
+    fn a_busy_shell_is_named_by_its_command() {
+        let (mut app, vault) = click_app(&["a"]);
+        let argv = ["sh".to_string(), "-i".to_string()];
+        let env = [("PS1".to_string(), "prompt> ".to_string()), ("ENV".to_string(), "/dev/null".to_string())];
+        let mut t = fresh(TabKind::Shell, None, None);
+        t.pane = Some(Pane::spawn(&argv, &vault.0, &env, 10, 60).unwrap());
+        let wait = |t: &Tab, f: &dyn Fn(&Tab) -> bool| {
+            let start = Instant::now();
+            while !f(t) {
+                assert!(start.elapsed() < Duration::from_secs(5));
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        };
+        wait(&t, &|t| t.pane.as_ref().unwrap().snapshot(&[]).windows(7).any(|w| w == b"prompt>"));
+        t.pane.as_mut().unwrap().write(b"sleep 30\r");
+        wait(&t, &|t| t.busy_label().is_some_and(|b| b != "shell: running command"));
+        with_tabs(&mut app, "a", vec![t], 0);
+        app.select_id("a".into());
+        key(&mut app, 'd');
+        let Mode::Confirm(ConfirmKind::Retire { busy, .. }) = app.mode.clone() else { panic!("no confirm") };
+        assert_eq!(busy, ["shell: sleep"]);
+    }
+
+    #[test]
+    fn a_closed_session_whose_transcript_is_gone_leaves_no_line() {
+        let (mut app, vault) = click_app(&["a"]);
+        let t = fresh(TabKind::Claude, Some(S1), None);
+        let sf = status::StatusFile {
+            status: ClaudeStatus::Idle,
+            session_id: Some(S1.into()),
+            transcript: Some(vault.0.join("gone.jsonl").to_string_lossy().into_owned()),
+            message: None,
+            event: "Stop".into(),
+            ts: 0,
+        };
+        std::fs::create_dir_all(status::status_dir()).unwrap();
+        std::fs::write(status::status_path(&t.st.id), serde_json::to_vec(&sf).unwrap()).unwrap();
+        with_tabs(&mut app, "a", vec![t], 0);
+        app.select_id("a".into());
+        assert!(!app.close_tab_at("a", 0), "nothing to reopen");
+        assert!(app.rt["a"].closed.is_empty());
+        key(&mut app, 'd');
+        assert!(!note_text(&app, "a").contains("--resume"));
+    }
+
+    #[test]
+    fn a_session_open_in_another_issue_is_shown_there() {
+        let (mut app, _vault) = click_app(&["a", "b"]);
+        with_tabs(&mut app, "a", vec![], 0);
+        app.state.issues.insert("b".into(), IssueState { tabs: vec![fresh(TabKind::Shell, None, None).st, fresh(TabKind::Claude, Some(S1), None).st], ..Default::default() });
+        app.select_id("a".into());
+        resume(&mut app, S1);
+        assert_eq!(app.selected.as_deref(), Some("b"));
+        assert_eq!(app.rt["b"].active, 1);
+        assert!(app.rt["a"].tabs.is_empty(), "no second process on the session");
+        assert_eq!(flashed(&app), "That session is open in b");
+    }
+
+    #[test]
+    fn resuming_twice_before_the_first_hook_opens_one_tab() {
+        let (mut app, vault) = click_app(&["a"]);
+        app.cfg.claude_command = vec!["sh".into(), "-c".into(), "sleep 30".into(), "sh".into()];
+        app.select_id("a".into());
+        let line = format!("`cd {} && claude --resume {S1}`", shell_word(&vault.0.to_string_lossy()));
+        resume(&mut app, &line);
+        assert_eq!(app.rt["a"].tabs[0].st.cwd.as_deref(), Some(vault.0.as_path()), "where the pasted cd goes");
+        resume(&mut app, S1);
+        assert_eq!(app.rt["a"].tabs.len(), 1);
+        assert_eq!(flashed(&app), "That session is open in this tab");
     }
 }
