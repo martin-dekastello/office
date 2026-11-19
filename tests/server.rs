@@ -144,7 +144,7 @@ fn one_server_per_folder_with_attach_detach_and_quit() {
     let mut server = env.server();
     let mut a = env.connect();
     let (welcome, _) = until(&mut a, 10);
-    assert_eq!(welcome, [1, 2]); // mouse on by default, protocol version 2
+    assert_eq!(welcome, [1, 3]); // mouse on by default, protocol version 3
     hello(&mut a, 100, 30);
     let (_, _) = until(&mut a, 11);
 

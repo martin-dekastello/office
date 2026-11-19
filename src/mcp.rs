@@ -9,7 +9,7 @@
 
 use crate::api::Request;
 use crate::instance::Instance;
-use crate::proto::{ClientMsg, ServerMsg, VERSION};
+use crate::proto::{Changed, ClientMsg, ServerMsg, VERSION};
 use crate::query::{Answer, Issue, Query, TabInfo};
 use crate::server::Conn;
 use crate::state::TabKind;
@@ -32,8 +32,11 @@ use serde::Deserialize;
 use serde_json::Value;
 use std::io::{BufReader, BufWriter};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+use tokio::sync::broadcast;
 
 /// How long the server may take to answer. It answers between frames, so
 /// anything near this means it is stuck.
@@ -45,6 +48,10 @@ const OPEN_TIMEOUT: Duration = Duration::from_secs(60);
 const SCROLLBACK_LINES: usize = 200;
 /// Rows of a saved screen's last page, for `read_screen` of a suspended tab.
 const SAVED_ROWS: u16 = 50;
+/// How often to look for salash again after losing it, while subscribed.
+const RECONNECT: Duration = Duration::from_secs(1);
+/// What subscribers may fall behind by before they are told everything changed.
+const HEARD: usize = 64;
 
 const INSTRUCTIONS: &str = "salash runs Claude Code sessions, shells and note editors in tabs, \
 grouped by issue. These tools read its live state: issues and their stage, each tab's status \
@@ -53,9 +60,8 @@ act on the caller's own issue or tab; your own tab is marked \"self\": true.";
 
 /// `salash mcp`: serve MCP on stdin/stdout until the client goes.
 pub fn run(inst: Instance) -> Result<()> {
-    let conn = Link::open(&inst)?;
     let me = Me::from_env(&inst);
-    let link = Arc::new(Link { inst, conn: Mutex::new(Some(conn)) });
+    let link = Link::new(inst)?;
     let rt = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
     rt.block_on(async move {
         let service = Salash { link, me, tool_router: Salash::tool_router() }
@@ -67,17 +73,46 @@ pub fn run(inst: Instance) -> Result<()> {
     })
 }
 
-type Pipe = (BufReader<Conn>, BufWriter<Conn>);
+/// What the server says unasked, for subscribers.
+#[derive(Debug, Clone)]
+enum Heard {
+    Changed(Changed),
+    /// salash was found again after losing it: anything may have changed.
+    All,
+}
 
-/// The connection to the folder's server. One question at a time; after an
-/// error the next question connects again.
+/// One connection: where questions go, and where its reader thread puts the
+/// replies (and `Exit`). The channel ends when the connection does.
+struct Wire {
+    id: u64,
+    send: BufWriter<Conn>,
+    replies: Receiver<ServerMsg>,
+}
+
+/// The connection to the folder's server. One question at a time; after
+/// losing it the next question connects again, and so does a subscriber.
 struct Link {
     inst: Instance,
-    conn: Mutex<Option<Pipe>>,
+    conn: Mutex<Option<Wire>>,
+    heard: broadcast::Sender<Heard>,
+    /// Something subscribed, so every connection sends `Subscribe`.
+    watching: AtomicBool,
 }
 
 impl Link {
-    fn open(inst: &Instance) -> Result<Pipe> {
+    fn new(inst: Instance) -> Result<Arc<Link>> {
+        let link = Arc::new(Link {
+            inst,
+            conn: Mutex::new(None),
+            heard: broadcast::channel(HEARD).0,
+            watching: AtomicBool::new(false),
+        });
+        let first = Link::open(&link.inst)?;
+        link.attach(&mut link.conn.lock().unwrap(), first);
+        Ok(link)
+    }
+
+    fn open(inst: &Instance) -> Result<(BufReader<Conn>, BufWriter<Conn>)> {
         let stream = crate::client::connect(inst).map_err(|e| {
             let none = e
                 .downcast_ref::<std::io::Error>()
@@ -97,28 +132,101 @@ impl Link {
             Some(ServerMsg::Exit(why)) => bail!("{why}"),
             _ => bail!("salash sent something unexpected"),
         }
+        // Its reader waits as long as salash runs; questions time out on their own.
+        conn.set_recv_timeout(None)?;
         Ok((recv, BufWriter::new(Conn(conn))))
     }
 
-    fn ask(&self, query: Query) -> Result<Answer, String> {
-        let mut conn = self.conn.lock().unwrap();
-        if conn.is_none() {
-            *conn = Some(Link::open(&self.inst).map_err(|e| format!("{e:#}"))?);
+    /// Connect again, subscribing if something listens.
+    fn connect(self: &Arc<Self>, conn: &mut Option<Wire>) -> Result<(), String> {
+        let pipe = Link::open(&self.inst).map_err(|e| format!("{e:#}"))?;
+        self.attach(conn, pipe);
+        Ok(())
+    }
+
+    /// Start a reader for a new connection and make it the one questions use.
+    /// While watching it subscribes, and subscribers hear that anything may
+    /// have changed: salash may have restarted in between.
+    fn attach(self: &Arc<Self>, conn: &mut Option<Wire>, (recv, mut send): (BufReader<Conn>, BufWriter<Conn>)) {
+        static NEXT: AtomicU64 = AtomicU64::new(1);
+        let id = NEXT.fetch_add(1, Ordering::Relaxed);
+        let watching = self.watching.load(Ordering::SeqCst);
+        // A failed write shows up as the reader ending.
+        if watching {
+            let _ = ClientMsg::Subscribe.write(&mut send);
         }
-        let (recv, send) = conn.as_mut().unwrap();
-        let result = exchange(recv, send, query);
-        if result.is_err() {
+        let (tx, replies) = mpsc::channel();
+        let link = self.clone();
+        std::thread::spawn(move || link.read(id, recv, tx));
+        *conn = Some(Wire { id, send, replies });
+        if watching {
+            let _ = self.heard.send(Heard::All);
+        }
+    }
+
+    /// A connection's reader: replies go to the asker, changes to subscribers.
+    /// Once salash is gone, a subscriber's link looks for it again.
+    fn read(self: Arc<Self>, id: u64, mut recv: BufReader<Conn>, replies: Sender<ServerMsg>) {
+        loop {
+            match ServerMsg::read(&mut recv) {
+                Ok(Some(ServerMsg::Changed(c))) => {
+                    let _ = self.heard.send(Heard::Changed(c));
+                }
+                Ok(Some(m @ (ServerMsg::Reply { .. } | ServerMsg::Exit(_)))) => {
+                    let _ = replies.send(m);
+                }
+                Ok(Some(_)) => {}
+                Ok(None) | Err(_) => break,
+            }
+        }
+        // First, so an asker waiting on it hears at once, before the lock.
+        drop(replies);
+        let mut conn = self.conn.lock().unwrap();
+        if conn.as_ref().is_some_and(|w| w.id == id) {
             *conn = None;
         }
-        result
+        drop(conn);
+        while self.watching.load(Ordering::SeqCst) {
+            std::thread::sleep(RECONNECT);
+            let mut conn = self.conn.lock().unwrap();
+            if conn.is_some() || self.connect(&mut conn).is_ok() {
+                break;
+            }
+        }
+    }
+
+    fn ask(self: &Arc<Self>, query: Query) -> Result<Answer, String> {
+        let mut conn = self.conn.lock().unwrap();
+        if conn.is_none() {
+            self.connect(&mut conn)?;
+        }
+        exchange(&mut conn, query)
+    }
+
+    /// Have salash tell what changes, from now on and on every connection.
+    fn watch(self: &Arc<Self>) -> Result<(), String> {
+        if self.watching.swap(true, Ordering::SeqCst) {
+            return Ok(());
+        }
+        let mut conn = self.conn.lock().unwrap();
+        let sent = conn.as_mut().is_some_and(|w| ClientMsg::Subscribe.write(&mut w.send).is_ok());
+        if !sent {
+            *conn = None;
+            if let Err(e) = self.connect(&mut conn) {
+                self.watching.store(false, Ordering::SeqCst);
+                return Err(e);
+            }
+        }
+        Ok(())
     }
 }
 
-/// Send one query and wait for its reply. One is in flight at a time, so
-/// the id only has to differ from the last one's.
-fn exchange(recv: &mut BufReader<Conn>, send: &mut BufWriter<Conn>, query: Query) -> Result<Answer, String> {
-    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
-    let id = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+/// Send one query and wait for its reply. One is in flight at a time, but
+/// a reply that came too late may still arrive, so ids never repeat. A
+/// question that times out keeps the connection; one that loses it drops it.
+fn exchange(conn: &mut Option<Wire>, query: Query) -> Result<Answer, String> {
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+    let id = NEXT.fetch_add(1, Ordering::Relaxed);
     let opens = matches!(query, Query::OpenTab(_));
     let timeout = if opens { OPEN_TIMEOUT } else { REPLY_TIMEOUT };
     let lost = |e: &dyn std::fmt::Display| {
@@ -128,17 +236,24 @@ fn exchange(recv: &mut BufReader<Conn>, send: &mut BufWriter<Conn>, query: Query
             format!("lost salash: {e}")
         }
     };
-    recv.get_ref().0.set_recv_timeout(Some(timeout)).map_err(|e| lost(&e))?;
-    ClientMsg::Query { id, query }.write(send).map_err(|e| lost(&e))?;
-    loop {
-        match ServerMsg::read(recv) {
-            Ok(Some(ServerMsg::Reply { id: got, answer })) if got == id => return Ok(answer),
-            Ok(Some(ServerMsg::Exit(why))) => return Err(format!("salash stopped: {why}")),
-            Ok(Some(_)) => {}
-            Ok(None) => return Err("salash stopped".into()),
-            Err(e) => return Err(lost(&e)),
-        }
+    let wire = conn.as_mut().expect("connected before asking");
+    if let Err(e) = (ClientMsg::Query { id, query }).write(&mut wire.send) {
+        *conn = None;
+        return Err(lost(&e));
     }
+    let deadline = std::time::Instant::now() + timeout;
+    let result = loop {
+        let left = deadline.saturating_duration_since(std::time::Instant::now());
+        match wire.replies.recv_timeout(left) {
+            Ok(ServerMsg::Reply { id: got, answer }) if got == id => return Ok(answer),
+            Ok(ServerMsg::Exit(why)) => break Err(format!("salash stopped: {why}")),
+            Ok(_) => {}
+            Err(RecvTimeoutError::Timeout) => return Err(lost(&"timed out")),
+            Err(RecvTimeoutError::Disconnected) => break Err("salash stopped".into()),
+        }
+    };
+    *conn = None;
+    result
 }
 
 /// The salash tab this runs in, if it does: Claude passes its environment on.
