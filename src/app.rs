@@ -170,6 +170,8 @@ pub struct IssueRt {
     pub tabs: Vec<Tab>,
     pub active: usize,
     pub worktree: Option<PathBuf>,
+    /// Closed Claude tabs for `R`. Only resumable sessions are ever put here
+    /// (`close_tab_at`, `retire_tabs`), so they aren't checked again.
     pub closed: Vec<TabState>,
     pub creating: Option<WorktreeJob>,
     /// Why the worktree script last failed, until it's tried again.
