@@ -120,12 +120,28 @@ fn detect() -> Option<(f32, Option<Rgb>)> {
     Some((c.luma(), rgb))
 }
 
+/// `from` moved `amount` (0–1) of the way to `to`.
+pub fn blend(from: Rgb, to: Rgb, amount: f32) -> Color {
+    let amount = amount.clamp(0.0, 1.0);
+    let mix = |a: u8, b: u8| (a as f32 + (b as f32 - a as f32) * amount).round() as u8;
+    Color::Rgb(mix(from.0, to.0), mix(from.1, to.1), mix(from.2, to.2))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn bg(t: &Theme) -> Color {
         t.bg_side
+    }
+
+    #[test]
+    fn blending_moves_toward_either_background() {
+        assert_eq!(blend((200, 200, 200), (0, 0, 0), 0.0), Color::Rgb(200, 200, 200));
+        assert_eq!(blend((200, 200, 200), (0, 0, 0), 1.0), Color::Rgb(0, 0, 0));
+        assert_eq!(blend((200, 100, 0), (0, 0, 0), 0.5), Color::Rgb(100, 50, 0));
+        // Dark text on a light background gets lighter.
+        assert_eq!(blend((40, 40, 48), (255, 255, 255), 0.5), Color::Rgb(148, 148, 152));
     }
 
     #[test]
