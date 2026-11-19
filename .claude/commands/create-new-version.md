@@ -91,7 +91,7 @@ If a fix is needed later, commit it on the release branch and move the tag with 
    - `$B paths` shows config, data and notes under `$T`
    - `$B new release smoke test` then `$B list` shows the issue, and a note appears under `$T/vault`
    - `HOME=$HOME_TEST $B install-hooks` writes `$HOME_TEST/.claude/settings.json`
-   - the plugin gets written: start a headless server with `$B server $T/work &`, wait for `$T/work/.salash/plugin/.claude-plugin/plugin.json`, then kill the server. The manifest has `"version": "X.Y.Z"`, and `$T/work/.salash/plugin/skills/new-salash-tab/SKILL.md` exists.
+   - the plugin gets written: start a headless server with `$B server $T/work &`, wait for `$T/work/.salash/plugin/.claude-plugin/plugin.json`, then kill the server. The manifest has `"version": "X.Y.Z"`, and `$T/work/.salash/plugin/skills/new-tab/SKILL.md` exists.
 3. Manual checklist. Give it to the user. They run `$B $T/work` in a separate terminal with the same env vars. Get an explicit confirmation for each item:
    - [ ] It launches. Issues are on the left. Creating an issue writes its Obsidian note.
    - [ ] Open a Claude tab. It works, and the statuses show: working (yellow half-circle) and needs-you (triangle).

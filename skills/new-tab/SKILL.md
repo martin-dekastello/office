@@ -1,11 +1,11 @@
 ---
-name: new-salash-tab
-description: Open a new Claude Code tab in the same salash issue, seeded with a handoff brief of the relevant context from this conversation and started in a chosen permission mode (plan, auto, acceptEdits, manual, dontAsk, bypass). Use when the user says "/salash:new-salash-tab plan …" (or "/new-salash-tab plan …"), "spin off a new claude tab for …", or wants to hand a task to a parallel session while running inside salash.
+name: new-tab
+description: Open a new Claude Code tab in the same salash issue, seeded with a handoff brief of the relevant context from this conversation and started in a chosen permission mode (plan, auto, acceptEdits, manual, dontAsk, bypass). Use when the user says "/salash:new-tab plan …", "spin off a new claude tab for …", or wants to hand a task to a parallel session while running inside salash.
 ---
 
 # Spin off a new Claude tab in salash
 
-`/salash:new-salash-tab [mode] <task…>` opens a new Claude tab in the salash issue this
+`/salash:new-tab [mode] <task…>` opens a new Claude tab in the salash issue this
 session belongs to. The tab runs in the given permission mode, and its first prompt is a
 handoff brief: the relevant context from this conversation plus the task. You are the
 *calling* session. The new one starts with no context, so the brief is everything it knows.

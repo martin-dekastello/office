@@ -152,7 +152,7 @@ fn one_server_per_folder_with_attach_detach_and_quit() {
     let plugin = env.folder.join(".salash/plugin");
     let manifest = std::fs::read_to_string(plugin.join(".claude-plugin/plugin.json")).unwrap();
     assert!(manifest.contains("\"name\": \"salash\""), "{manifest}");
-    assert!(plugin.join("skills/new-salash-tab/SKILL.md").is_file());
+    assert!(plugin.join("skills/new-tab/SKILL.md").is_file());
 
     // The folder is taken: starting again fails and says how to attach.
     let again = env.run(&[env.folder.to_str().unwrap()]);
@@ -268,7 +268,7 @@ fn without_injected_hooks_claude_still_gets_the_plugin() {
     let plugin = env.folder.join(".salash/plugin");
     assert!(args.contains(&format!("--plugin-dir\n{}\n", plugin.display())), "{args}");
     assert!(!args.contains("--settings"), "{args}");
-    assert!(plugin.join("skills/new-salash-tab/SKILL.md").is_file());
+    assert!(plugin.join("skills/new-tab/SKILL.md").is_file());
 
     server.kill().ok();
     server.wait().ok();
