@@ -562,32 +562,14 @@ fn draw_prompt(f: &mut Frame, area: Rect, title: &str, body: &str, matches: Opti
 
 /// A question, wrapped so all of it shows: it may name several busy tabs.
 fn draw_confirm(f: &mut Frame, area: Rect, q: &str) {
-    let width = centered(area, 70, 3).width.saturating_sub(2).max(1) as usize;
-    let rows = wrapped_rows(q, width);
-    let r = centered(area, 70, 2 + rows);
-    f.render_widget(Clear, r);
     let b = Block::bordered().border_type(BorderType::Rounded).title(" Confirm ").border_style(Style::new().fg(colors().accent));
     let p = Paragraph::new(q.to_string()).wrap(Wrap { trim: true }).block(b);
+    // The width wrapped to is the text's: line_count adds the block's rows, not its columns.
+    let width = centered(area, 70, 3).width.saturating_sub(2).max(1);
+    let rows = p.line_count(width).min(u16::MAX as usize) as u16;
+    let r = centered(area, 70, rows);
+    f.render_widget(Clear, r);
     f.render_widget(p.style(Style::new().fg(colors().fg).bg(colors().bg_side)), r);
-}
-
-/// Rows `s` takes when word-wrapped to `width`, as ratatui's `Wrap` does it.
-fn wrapped_rows(s: &str, width: usize) -> u16 {
-    let mut rows = 1;
-    let mut col = 0;
-    for w in s.split_whitespace() {
-        let n = w.chars().count();
-        if col > 0 && col + 1 + n > width {
-            rows += 1;
-            col = 0;
-        }
-        col += if col > 0 { 1 } else { 0 } + n;
-        while col > width {
-            rows += 1;
-            col -= width;
-        }
-    }
-    rows
 }
 
 fn draw_help(app: &App, f: &mut Frame, area: Rect) {

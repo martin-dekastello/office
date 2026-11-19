@@ -343,8 +343,8 @@ impl Vault {
         Ok(n)
     }
 
-    /// Append a line under the "## Sessions" heading (or at the end).
-    pub fn append_session_line(&self, note: &Note, line: &str) -> Result<()> {
+    /// Append lines under the "## Sessions" heading (or at the end), in one write.
+    pub fn append_session_lines(&self, note: &Note, lines: &[String]) -> Result<()> {
         let text = fs::read_to_string(&note.path)?;
         let mut out = text.trim_end_matches('\n').to_string();
         if !out.contains("\n## Sessions") {
@@ -352,7 +352,10 @@ impl Vault {
         }
         // Sessions is the last section in the template; appending at the end
         // never touches anything the user wrote above it.
-        out.push_str(&format!("\n{line}\n"));
+        for line in lines {
+            out.push_str(&format!("\n{line}"));
+        }
+        out.push('\n');
         fs::write(&note.path, out)?;
         Ok(())
     }
@@ -415,8 +418,8 @@ mod tests {
         let d = v.move_to(&n, Stage::Done).unwrap();
         assert!(d.path.ends_with("done/GH-7-mapa-dlazdic.md"));
         assert_eq!(v.find("GH-7").unwrap().stage, Stage::Done);
-        v.append_session_line(&d, "- test").unwrap();
-        assert!(fs::read_to_string(&d.path).unwrap().trim_end().ends_with("- test"));
+        v.append_session_lines(&d, &["- test".into(), "- two".into()]).unwrap();
+        assert!(fs::read_to_string(&d.path).unwrap().ends_with("\n- test\n- two\n"));
         assert_eq!(v.next_local_id("LOCAL"), "LOCAL-1");
         fs::remove_dir_all(dir).ok();
     }

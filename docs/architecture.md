@@ -129,7 +129,10 @@ To undo it, quit salash, then move `<folder>/.salash/state.json` (with `snapshot
 
 - **Finished issues.** Moving an issue to Done or Archive (`App::move_stage`) moves the note
   first, then `retire_tabs` writes a `cd <dir> && claude --resume <id>` line per resumable
-  session and drops the panes. A tab's directory is its saved `cwd`, else the issue's worktree.
+  session, all in one write, and drops the panes. A tab's directory is its saved `cwd`, else
+  the issue's worktree. If the write fails, or a kept note editor would save over it, the
+  sessions go to the issue's closed tabs instead, which keeps it in the rescan's list until a
+  later write succeeds; nothing is forgotten before it is in the note.
   Each rescan (every 3 s) runs the same cleanup for notes moved outside salash, skipping busy
   tabs, which are retried on the next rescan. A shell's busyness is
   `tcgetpgrp` on the PTY master (portable-pty's `process_group_leader`) compared with the

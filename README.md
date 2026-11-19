@@ -61,11 +61,14 @@ The name comes from the Slovak word *salaš*, a shepherd's hut up in the mountai
   (Claude working, starting or waiting for you; a shell running a command; an open note
   editor), salash names it and asks first. A note moved to Done or Archive outside salash, in
   Obsidian say, gets the same cleanup on the next rescan, except that busy tabs keep running
-  until they are idle. No new tabs open on a Done or Archive issue: move it back with `u`.
-  The worktree and branch stay.
+  until they are idle. While a note editor is left running, or if the note can't be written,
+  the stopped Claude sessions stay as closed tabs (`R` brings them back) and their lines are
+  written on a later rescan. The lines use your `claude_command`. No new tabs open on a Done
+  or Archive issue: move it back with `u`. The worktree and branch stay.
 - **Resume any session by ID.** `I` asks for a session ID and opens a Claude tab running
   `claude --resume <id>`, where `c` would start one. Paste the ID, or a whole line from
-  `## Sessions`. If the session is already open in a tab, salash shows that tab instead.
+  `## Sessions`, whose `cd <dir>` then sets where the tab starts. If the session is already
+  open in a tab, in this issue or another, salash shows that tab instead.
 - **One salash per folder, running in the background**, like a tmux server. `salash ~/work`
   starts it and attaches. Closing the terminal, or `D` to detach, leaves every tab running, and
   `salash --attach ~/work` picks it up again, from another terminal or over ssh. Several people
