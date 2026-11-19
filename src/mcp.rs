@@ -23,13 +23,15 @@ use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{
     Implementation, ListResourceTemplatesResult, ListResourcesResult, PaginatedRequestParams,
     ReadResourceRequestParams, ReadResourceResponse, ReadResourceResult, Resource,
-    ResourceContents, ResourceTemplate, ServerCapabilities, ServerConfig,
+    ResourceContents, ResourceTemplate, ResourceUpdatedNotificationParam, ServerCapabilities,
+    ServerConfig, SubscribeRequestParams, SubscriptionFilter, UnsubscribeRequestParams,
 };
 use rmcp::schemars::{self, JsonSchema};
-use rmcp::service::RequestContext;
-use rmcp::{tool, tool_handler, tool_router, ErrorData, RoleServer, ServerHandler, ServiceExt};
+use rmcp::service::{RequestContext, SubscriptionContext};
+use rmcp::{tool, tool_handler, tool_router, ErrorData, Peer, RoleServer, ServerHandler, ServiceExt};
 use serde::Deserialize;
 use serde_json::Value;
+use std::collections::BTreeSet;
 use std::io::{BufReader, BufWriter};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -64,7 +66,7 @@ pub fn run(inst: Instance) -> Result<()> {
     let link = Link::new(inst)?;
     let rt = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
     rt.block_on(async move {
-        let service = Salash { link, me, tool_router: Salash::tool_router() }
+        let service = Salash { link, me, legacy: Arc::default(), tool_router: Salash::tool_router() }
             .serve(rmcp::transport::stdio())
             .await
             .context("starting MCP")?;
@@ -282,7 +284,16 @@ impl Me {
 struct Salash {
     link: Arc<Link>,
     me: Me,
+    legacy: Arc<Legacy>,
     tool_router: ToolRouter<Salash>,
+}
+
+/// `resources/subscribe` of clients before 2026-07-28: the URIs, and whether
+/// the task that tells them about changes runs.
+#[derive(Default)]
+struct Legacy {
+    uris: Mutex<BTreeSet<String>>,
+    started: AtomicBool,
 }
 
 #[derive(Deserialize, JsonSchema, Default)]
@@ -396,6 +407,16 @@ impl Salash {
     async fn ask(&self, q: Query) -> Result<Answer, String> {
         let link = self.link.clone();
         tokio::task::spawn_blocking(move || link.ask(q)).await.map_err(|e| e.to_string())?
+    }
+
+    /// Have salash tell what changes, off the async runtime too.
+    async fn watch(&self) -> Result<(), ErrorData> {
+        let link = self.link.clone();
+        tokio::task::spawn_blocking(move || link.watch())
+            .await
+            .map_err(|e| e.to_string())
+            .and_then(|r| r)
+            .map_err(|e| ErrorData::internal_error(e, None))
     }
 
     fn mark(&self, t: &mut TabInfo) {
@@ -537,10 +558,70 @@ fn resource_error(e: String) -> ErrorData {
     ErrorData::resource_not_found(e, None)
 }
 
+/// Whether a resource can be subscribed to. Screens can't: they change with
+/// every byte a tab prints.
+fn notifiable(uri: &str) -> bool {
+    let one = |prefix| uri.strip_prefix(prefix).is_some_and(|id: &str| !id.is_empty() && !id.contains('/'));
+    uri == ISSUES_URI || one("salash://issue/") || one("salash://tab/")
+}
+
+/// What a `subscriptions/listen` gets of what it asked for: the list, and
+/// resources but screens. Tools and prompts never change.
+fn accepted(requested: &SubscriptionFilter) -> SubscriptionFilter {
+    let mut f = SubscriptionFilter::builder();
+    if requested.resources_list_changed == Some(true) {
+        f = f.resources_list_changed();
+    }
+    for uri in requested.resource_subscriptions.iter().flatten().filter(|u| notifiable(u)) {
+        f = f.resource_subscription(uri.clone());
+    }
+    f.build()
+}
+
+/// Which of `subscribed` to say were updated, and whether the list changed.
+fn affected(heard: &Heard, subscribed: &[String]) -> (Vec<String>, bool) {
+    match heard {
+        Heard::All => (subscribed.to_vec(), true),
+        Heard::Changed(c) => (subscribed.iter().filter(|u| c.uris.contains(u)).cloned().collect(), c.list),
+    }
+}
+
+/// The next thing heard. One that fell behind hears that anything may have changed.
+async fn next(rx: &mut broadcast::Receiver<Heard>) -> Option<Heard> {
+    match rx.recv().await {
+        Ok(h) => Some(h),
+        Err(broadcast::error::RecvError::Lagged(_)) => Some(Heard::All),
+        Err(broadcast::error::RecvError::Closed) => None,
+    }
+}
+
+/// Tell a client from before 2026-07-28 about changes to what it subscribed
+/// to, and to the list, until it goes.
+async fn forward(mut rx: broadcast::Receiver<Heard>, peer: Peer<RoleServer>, legacy: Arc<Legacy>) {
+    while let Some(heard) = next(&mut rx).await {
+        let subscribed: Vec<String> = legacy.uris.lock().unwrap().iter().cloned().collect();
+        let (updated, list) = affected(&heard, &subscribed);
+        for uri in updated {
+            if peer.notify_resource_updated(ResourceUpdatedNotificationParam::new(uri)).await.is_err() {
+                return;
+            }
+        }
+        if list && peer.notify_resource_list_changed().await.is_err() {
+            return;
+        }
+    }
+}
+
 #[tool_handler(router = self.tool_router)]
 impl ServerHandler for Salash {
     fn get_info(&self) -> ServerConfig {
-        ServerConfig::new(ServerCapabilities::builder().enable_tools().enable_resources().build())
+        let caps = ServerCapabilities::builder()
+            .enable_tools()
+            .enable_resources()
+            .enable_resources_subscribe()
+            .enable_resources_list_changed()
+            .build();
+        ServerConfig::new(caps)
             .with_server_info(Implementation::new("salash", env!("CARGO_PKG_VERSION")))
             .with_instructions(INSTRUCTIONS)
     }
@@ -599,6 +680,65 @@ impl ServerHandler for Salash {
         };
         Ok(ReadResourceResult::new(vec![ResourceContents::text(text, uri).with_mime_type(mime)]).into())
     }
+
+    fn accepted_subscription_filter(&self, requested: &SubscriptionFilter) -> Option<SubscriptionFilter> {
+        Some(accepted(requested))
+    }
+
+    async fn listen(&self, ctx: SubscriptionContext) -> Result<(), ErrorData> {
+        let mut rx = self.link.heard.subscribe();
+        self.watch().await?;
+        let accepted = ctx.accepted();
+        let uris = accepted.resource_subscriptions.clone().unwrap_or_default();
+        let list = accepted.resources_list_changed == Some(true);
+        loop {
+            let heard = tokio::select! {
+                _ = ctx.cancelled() => return Ok(()),
+                h = next(&mut rx) => match h {
+                    Some(h) => h,
+                    None => return Ok(()),
+                },
+            };
+            let (updated, listed) = affected(&heard, &uris);
+            for uri in updated {
+                if ctx.sink().notify_resource_updated(uri).await.is_err() {
+                    return Ok(());
+                }
+            }
+            if list && listed && ctx.sink().notify_resource_list_changed().await.is_err() {
+                return Ok(());
+            }
+        }
+    }
+
+    #[allow(deprecated)]
+    async fn subscribe(&self, req: SubscribeRequestParams, ctx: RequestContext<RoleServer>) -> Result<(), ErrorData> {
+        if !notifiable(&req.uri) {
+            return Err(ErrorData::invalid_params(
+                format!(
+                    "{} can't be subscribed to; salash://issues, salash://issue/{{id}} and salash://tab/{{id}} can (screens aren't notified)",
+                    req.uri
+                ),
+                None,
+            ));
+        }
+        self.legacy.uris.lock().unwrap().insert(req.uri);
+        if !self.legacy.started.swap(true, Ordering::SeqCst) {
+            let rx = self.link.heard.subscribe();
+            if let Err(e) = self.watch().await {
+                self.legacy.started.store(false, Ordering::SeqCst);
+                return Err(e);
+            }
+            tokio::spawn(forward(rx, ctx.peer.clone(), self.legacy.clone()));
+        }
+        Ok(())
+    }
+
+    #[allow(deprecated)]
+    async fn unsubscribe(&self, req: UnsubscribeRequestParams, _: RequestContext<RoleServer>) -> Result<(), ErrorData> {
+        self.legacy.uris.lock().unwrap().remove(&req.uri);
+        Ok(())
+    }
 }
 
 /// The folder `salash mcp` serves: the one given, else the one this runs in.
@@ -607,5 +747,45 @@ pub fn instance(folder: Option<PathBuf>) -> Result<Instance> {
         Some(f) => Instance::new(Some(&f)),
         None => Instance::find(&std::env::current_dir()?)
             .context("not in a salash folder; pass one: salash mcp <folder>"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn issues_and_tabs_can_be_subscribed_to_but_not_screens() {
+        for uri in ["salash://issues", "salash://issue/TS-42", "salash://issue/scratch", "salash://tab/t1"] {
+            assert!(notifiable(uri), "{uri}");
+        }
+        for uri in ["salash://tab/t1/screen", "salash://tab/", "salash://issue/", "salash://other", "file:///x", ""] {
+            assert!(!notifiable(uri), "{uri}");
+        }
+    }
+
+    #[test]
+    fn listen_accepts_the_list_and_resources_but_screens() {
+        let asked = SubscriptionFilter::builder()
+            .tools_list_changed()
+            .resources_list_changed()
+            .resource_subscriptions(["salash://tab/t1", "salash://tab/t1/screen", "salash://issues"].map(String::from))
+            .build();
+        let got = accepted(&asked);
+        assert_eq!(got.resources_list_changed, Some(true));
+        assert_eq!(got.tools_list_changed, None);
+        assert_eq!(got.resource_subscriptions, Some(vec!["salash://tab/t1".into(), "salash://issues".into()]));
+        assert_eq!(accepted(&SubscriptionFilter::new()), SubscriptionFilter::new());
+    }
+
+    #[test]
+    fn only_subscribed_uris_are_told() {
+        let subs = ["salash://tab/a".to_string(), "salash://issues".to_string()];
+        let c = Heard::Changed(Changed { uris: vec!["salash://tab/a".into(), "salash://tab/b".into()], list: false });
+        assert_eq!(affected(&c, &subs), (vec!["salash://tab/a".to_string()], false));
+        let c = Heard::Changed(Changed { uris: vec![], list: true });
+        assert_eq!(affected(&c, &subs), (vec![], true));
+        assert_eq!(affected(&Heard::All, &subs), (subs.to_vec(), true));
+        assert_eq!(affected(&Heard::All, &[]), (vec![], true));
     }
 }
