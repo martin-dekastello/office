@@ -127,6 +127,19 @@ To undo it, quit salash, then move `<folder>/.salash/state.json` (with `snapshot
   every second. Once it is back, subscribers hear that everything changed, as a restarted
   server may differ in anything.
 
+- **Finished issues.** Moving an issue to Done or Archive (`App::move_stage`) moves the note
+  first, then `retire_tabs` writes a `cd <dir> && claude --resume <id>` line per resumable
+  session and drops the panes. A tab's directory is its saved `cwd`, else the issue's worktree.
+  Each rescan (every 3 s) runs the same cleanup for notes moved outside salash, skipping busy
+  tabs, which are retried on the next rescan. A shell's busyness is
+  `tcgetpgrp` on the PTY master (portable-pty's `process_group_leader`) compared with the
+  shell's pid, and the name comes from `proc_name` (macOS) or `/proc/<pid>/comm` (Linux). This
+  is how tmux reads `#{pane_current_command}` (`osdep_get_name` in
+  [osdep-darwin.c](https://github.com/tmux/tmux/blob/master/osdep-darwin.c) and
+  [osdep-linux.c](https://github.com/tmux/tmux/blob/master/osdep-linux.c)). tmux's
+  `monitor-activity` (output since last viewed) isn't used: a shell redrawing its prompt
+  prints too.
+
 ## Protocol (`src/proto.rs`)
 
 Each frame is a tag byte, a big-endian `u32` length, then the payload. Frames are capped at
