@@ -255,8 +255,9 @@ to the terminal.
 Keys go to either the sidebar or the terminal, and you can tell which at a glance:
 
 - **Terminal focused:** a heavy frame (`┃` `━`) in the accent colour runs along the
-  terminal's left edge and under the tab bar, the active tab has a `▌` marker, and the
-  issue list is dimmed (its header and key hints stay lit).
+  terminal's left edge and under the tab bar, the active tab has a `▌` marker (the first
+  tab has the frame itself, which climbs up beside it), and the issue list is dimmed (its
+  header and key hints stay lit).
 - **Sidebar focused:** the frame is thin (`│` `─`), the selected issue has a `▌` bar, and the
   tab bar, terminal and status bar are dimmed. The active tab keeps its background, without
   the marker, so you can see which tab `x`, `z` and `,` act on.

@@ -2732,11 +2732,17 @@ mod tests {
     #[test]
     fn the_frame_is_heavy_only_with_the_terminal_focused() {
         // By shape, not colour.
-        for (focus, joint, column, line) in [(Focus::Terminal, "┢", "┃", "━"), (Focus::Sidebar, "├", "│", "─")] {
+        // With the first tab active the terminal's frame climbs up beside it.
+        for (focus, active, top, joint, column, line) in [
+            (Focus::Terminal, 0, "┃", "┣", "┃", "━"),
+            (Focus::Terminal, 1, "│", "┢", "┃", "━"),
+            (Focus::Sidebar, 0, "│", "├", "│", "─"),
+        ] {
             let mut app = focus_app(focus);
+            app.rt.get_mut("a").unwrap().active = active;
             let buf = render(&mut app, 100, 30);
             let x = app.sidebar_rect.right() - 1;
-            assert_eq!(buf[(x, 0)].symbol(), "│", "beside the tab bar stays thin");
+            assert_eq!(buf[(x, 0)].symbol(), top, "beside the tab bar");
             assert_eq!(buf[(x, 1)].symbol(), joint);
             assert_eq!(buf[(x, 15)].symbol(), column);
             assert_eq!(buf[(x, 29)].symbol(), "│", "beside the status bar stays thin");
@@ -2759,8 +2765,15 @@ mod tests {
         let buf = render(&mut app, 100, 30);
         let item = app.item_hits.iter().find(|(_, id)| id == "a").unwrap().0;
         assert_eq!(buf[(item.x, item.y)].symbol(), " ");
-        assert_eq!(buf[(x, 0)].symbol(), "▌");
+        assert_eq!(buf[(x - 1, 0)].symbol(), "┃", "the frame marks the first tab, in its column");
+        assert_eq!(buf[(x, 0)].symbol(), " ");
         assert_eq!(buf[(app.tab_hits[1].0.x, 0)].symbol(), " ", "only the active tab is marked");
+
+        app.rt.get_mut("a").unwrap().active = 1;
+        let buf = render(&mut app, 100, 30);
+        assert_eq!(buf[(x - 1, 0)].symbol(), "│");
+        assert_eq!(buf[(x, 0)].symbol(), " ");
+        assert_eq!(buf[(app.tab_hits[1].0.x, 0)].symbol(), "▌");
     }
 
     fn luma(c: ratatui::style::Color) -> f32 {
